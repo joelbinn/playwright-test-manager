@@ -267,8 +267,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     }
 
     const abortController = new AbortController();
-    req.raw.on('close', () => {
-      abortController.abort();
+    reply.raw.on('close', () => {
+      if (!reply.raw.writableEnded) {
+        abortController.abort();
+      }
     });
 
     const settings = await getSettings(options.workspaceRoot);
@@ -334,8 +336,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     }
 
     const abortController = new AbortController();
-    req.raw.on('close', () => {
-      abortController.abort();
+    reply.raw.on('close', () => {
+      if (!reply.raw.writableEnded) {
+        abortController.abort();
+      }
     });
 
     const settings = await getSettings(options.workspaceRoot);
@@ -416,8 +420,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     }
 
     const abortController = new AbortController();
-    req.raw.on('close', () => {
-      abortController.abort();
+    reply.raw.on('close', () => {
+      if (!reply.raw.writableEnded) {
+        abortController.abort();
+      }
     });
 
     const settings = await getSettings(options.workspaceRoot);

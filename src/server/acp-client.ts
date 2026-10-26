@@ -270,20 +270,37 @@ export class AcpClient {
       }
     });
 
+    let stderrOutput = '';
+    child.stderr?.on('data', (data) => {
+      stderrOutput += data.toString();
+    });
+
     child.on('error', (err) => {
       finishTask(err);
     });
 
-    child.on('exit', () => {
-      finishTask();
+    child.on('exit', (code) => {
+      if (code !== 0 && code !== null && !taskCompleted) {
+        const errorMsg = stderrOutput.trim()
+          ? `Agent process exited with code ${code}: ${stderrOutput.trim()}`
+          : `Agent process exited with code ${code}`;
+        finishTask(new Error(errorMsg));
+      } else {
+        finishTask();
+      }
     });
 
     // Handle abort signal
     if (params.signal) {
-      params.signal.addEventListener('abort', () => {
+      if (params.signal.aborted) {
         finishTask(new Error('Operation aborted'));
         this.closeProcess();
-      });
+      } else {
+        params.signal.addEventListener('abort', () => {
+          finishTask(new Error('Operation aborted'));
+          this.closeProcess();
+        });
+      }
     }
 
     let sessionId: string | undefined;
