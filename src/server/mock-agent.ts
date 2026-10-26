@@ -148,3 +148,61 @@ ${testStatements.join('\n')}
     yield chunk;
   }
 }
+
+export interface HealScriptOptions {
+  scriptContent: string;
+  specMarkdown?: string;
+  error?: string;
+  stack?: string;
+  tracePath?: string;
+  signal?: AbortSignal;
+  chunkDelayMs?: number;
+}
+
+export async function* healTestScriptStream(options: HealScriptOptions): AsyncIterable<string> {
+  const { scriptContent, specMarkdown, error, stack, tracePath, signal, chunkDelayMs = 25 } = options;
+
+  let repaired = scriptContent;
+
+  // 1. Detect fragile / broken selectors mentioned in error or script
+  const brokenSelectorMatch = error?.match(/locator\((['"][^'"]+['"])\)/);
+  if (brokenSelectorMatch) {
+    const rawSel = brokenSelectorMatch[1].replace(/['"]/g, '');
+    if (rawSel.startsWith('#broken-') || rawSel.includes('broken')) {
+      // Replace with resilient role locator
+      repaired = repaired.replace(
+        new RegExp(`await\\s+page\\.locator\\(['"]${rawSel}['"]\\)\\.click\\(\\);`, 'g'),
+        `// Repaired by Healer: replaced fragile selector with resilient role locator\n    await page.getByRole('button', { name: /submit|login|continue|ok/i }).click();`
+      );
+    }
+  }
+
+  // Fallback: if script contains broken-login-btn directly
+  if (repaired.includes('#broken-login-btn')) {
+    repaired = repaired.replace(
+      /await\s+page\.locator\(['"]#broken-login-btn['"]\)\.click\(\);/g,
+      `// Repaired by Healer: resilient login locator\n    await page.getByRole('button', { name: /submit|login/i }).click();`
+    );
+  }
+
+  // 2. Add comment with healing diagnostics if error was provided
+  if (error && !repaired.includes('Repaired by Healer')) {
+    const firstLine = error.split('\n')[0].replace(/\*/g, '');
+    repaired = `// Repaired by Healer agent: addressed failure "${firstLine}"\n` + repaired;
+  }
+
+  const chunks = repaired.match(/[^\n]+\n|\n/g) || [repaired];
+
+  for (const chunk of chunks) {
+    if (signal?.aborted) {
+      return;
+    }
+    if (chunkDelayMs > 0) {
+      await delay(chunkDelayMs);
+    }
+    if (signal?.aborted) {
+      return;
+    }
+    yield chunk;
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { planTestSpecStream, generateTestScriptStream } from '../../src/server/mock-agent.js';
+import { planTestSpecStream, generateTestScriptStream, healTestScriptStream } from '../../src/server/mock-agent.js';
 
 describe('Mock Agent Planner (Seam: Domain Generator)', () => {
   it('streams chunks of Markdown containing frontmatter and test scenario steps', async () => {
@@ -42,6 +42,65 @@ describe('Mock Agent Planner (Seam: Domain Generator)', () => {
     }
 
     // Should stop shortly after abort without producing the complete full stream
+    expect(chunks.length).toBe(2);
+  });
+});
+
+describe('Mock Agent Healer (Seam: Domain Generator)', () => {
+  it('analyzes failure artifacts and streams targeted repaired test script', async () => {
+    const brokenScript = `import { test, expect } from '@playwright/test';
+
+test.describe('Login flow', () => {
+  test('Login flow', async ({ page }) => {
+    await page.goto('/login');
+    await page.locator('#broken-login-btn').click();
+    await expect(page.locator('.user-dashboard')).toBeVisible();
+  });
+});
+`;
+
+    const error = "Error: Timed out 5000ms waiting for getByRole('button', { name: 'Submit' }) or locator('#broken-login-btn')";
+    const stack = "    at /tests/login.spec.ts:5:45";
+
+    const chunks: string[] = [];
+    const stream = healTestScriptStream({
+      scriptContent: brokenScript,
+      error,
+      stack,
+      chunkDelayMs: 1
+    });
+
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+
+    const repairedScript = chunks.join('');
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(repairedScript).toContain("import { test, expect } from '@playwright/test';");
+    // Should have repaired the broken locator with a resilient locator and wait
+    expect(repairedScript).not.toContain('#broken-login-btn');
+    expect(repairedScript).toContain('Login flow');
+  });
+
+  it('stops healer stream when abort signal fires', async () => {
+    const controller = new AbortController();
+    const chunks: string[] = [];
+    const stream = healTestScriptStream({
+      scriptContent: 'line 1\nline 2\nline 3\nline 4\n',
+      error: 'some error',
+      signal: controller.signal,
+      chunkDelayMs: 20
+    });
+
+    let count = 0;
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+      count++;
+      if (count === 2) {
+        controller.abort();
+      }
+    }
+
     expect(chunks.length).toBe(2);
   });
 });

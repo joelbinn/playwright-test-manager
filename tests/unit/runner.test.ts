@@ -122,4 +122,35 @@ process.exit(0);`
 
     await fs.rm(tempDir, { recursive: true, force: true });
   });
+
+  it('captures failure artifacts including error message, stack trace, and trace file path when test fails', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ptm-runner-artifacts-'));
+    const testResultsDir = path.join(tempDir, 'test-results', 'checkout-test');
+    await fs.mkdir(testResultsDir, { recursive: true });
+    const dummyTrace = path.join(testResultsDir, 'trace.zip');
+    await fs.writeFile(dummyTrace, 'dummy-trace-content');
+
+    const fakeScript = path.join(tempDir, 'fake-fail-with-artifacts.js');
+    await fs.writeFile(
+      fakeScript,
+      `console.error("Error: Timed out 5000ms waiting for locator('#submit-btn') to be visible");
+console.error("    at checkout.spec.ts:18:24");
+process.exit(1);`
+    );
+
+    const result = await runPlaywright({
+      workspaceRoot: tempDir,
+      scriptSlug: 'checkout',
+      headed: false,
+      command: `node ${fakeScript}`
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain("Timed out 5000ms waiting for locator('#submit-btn') to be visible");
+    expect(result.stack).toContain('at checkout.spec.ts:18:24');
+    expect(result.tracePath).toBeDefined();
+    expect(result.tracePath).toContain('trace.zip');
+
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
 });

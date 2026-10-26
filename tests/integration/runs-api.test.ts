@@ -153,4 +153,65 @@ process.exit(0);`
     expect(finishStatus).toBeDefined();
     expect(finishStatus.slug).toBe('all');
   });
+
+  it('broadcasts error, stack, and trace artifacts on failed runs over WebSocket and updates status', async () => {
+    const fakeScript = path.join(tempDir, 'fake-fail-stream.js');
+    await fs.writeFile(
+      fakeScript,
+      `console.error("Error: Timed out 5000ms waiting for locator('#checkout')");
+console.error("    at checkout.spec.ts:12:15");
+process.exit(1);`
+    );
+
+    // Place dummy trace.zip
+    const traceDir = path.join(tempDir, 'test-results', 'checkout-run');
+    await fs.mkdir(traceDir, { recursive: true });
+    await fs.writeFile(path.join(traceDir, 'trace.zip'), 'dummy-trace-zip');
+
+    const ws = new WebSocket(`ws://127.0.0.1:${serverPort}/ws/runs`);
+    const receivedMessages: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      ws.on('open', () => resolve());
+      ws.on('error', reject);
+    });
+
+    ws.on('message', (raw) => {
+      try {
+        receivedMessages.push(JSON.parse(raw.toString()));
+      } catch (e) {}
+    });
+
+    const triggerRes = await fetch(`http://127.0.0.1:${serverPort}/api/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slug: 'checkout',
+        headed: false,
+        command: `node ${fakeScript}`
+      })
+    });
+
+    expect(triggerRes.status).toBe(200);
+
+    await new Promise<void>((resolve) => {
+      const interval = setInterval(() => {
+        if (receivedMessages.some((m) => m.type === 'status' && m.status === 'failed')) {
+          clearInterval(interval);
+          resolve();
+        }
+      }, 50);
+    });
+
+    ws.close();
+
+    const failStatus = receivedMessages.find(
+      (m) => m.type === 'status' && m.status === 'failed'
+    );
+    expect(failStatus).toBeDefined();
+    expect(failStatus.slug).toBe('checkout');
+    expect(failStatus.error).toContain("Timed out 5000ms waiting for locator('#checkout')");
+    expect(failStatus.stack).toContain('at checkout.spec.ts:12:15');
+    expect(failStatus.tracePath).toContain('trace.zip');
+  });
 });

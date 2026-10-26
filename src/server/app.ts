@@ -2,10 +2,13 @@ import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { Readable } from 'node:stream';
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { scanWorkspace } from './workspace.js';
 import { readSpec, writeSpec, createSpec } from './specs.js';
 import { readScript, writeScript } from './scripts.js';
-import { planTestSpecStream, generateTestScriptStream } from './mock-agent.js';
+import { planTestSpecStream, generateTestScriptStream, healTestScriptStream } from './mock-agent.js';
 import { runPlaywright } from './runner.js';
 
 export interface ServerOptions {
@@ -21,6 +24,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
   await app.register(websocket);
 
   const scriptStatuses: Record<string, 'passed' | 'failed' | 'running'> = {};
+  const failureArtifacts: Record<string, { error?: string; stack?: string; tracePath?: string; traceUrl?: string }> = {};
   const activeSockets = new Set<any>();
 
   function broadcast(message: any) {
@@ -34,6 +38,37 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     }
   }
 
+  async function findTraceFile(slug?: string): Promise<string | undefined> {
+    const resultsDir = path.join(options.workspaceRoot, 'test-results');
+    try {
+      const entries = await fs.readdir(resultsDir, { withFileTypes: true });
+      if (slug && slug !== 'all') {
+        const cleanSlug = slug.replace(/\.spec\.[jt]s$/, '');
+        for (const entry of entries) {
+          if (entry.isDirectory() && entry.name.toLowerCase().includes(cleanSlug.toLowerCase())) {
+            const subPath = path.join(resultsDir, entry.name, 'trace.zip');
+            try {
+              await fs.access(subPath);
+              return path.relative(options.workspaceRoot, subPath);
+            } catch {}
+          }
+        }
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const subPath = path.join(resultsDir, entry.name, 'trace.zip');
+          try {
+            await fs.access(subPath);
+            return path.relative(options.workspaceRoot, subPath);
+          } catch {}
+        } else if (entry.name === 'trace.zip') {
+          return path.relative(options.workspaceRoot, path.join(resultsDir, entry.name));
+        }
+      }
+    } catch {}
+    return undefined;
+  }
+
   app.get('/ws/runs', { websocket: true }, (socket) => {
     activeSockets.add(socket);
     socket.on('close', () => {
@@ -43,6 +78,37 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 
   app.get('/api/runs/status', async () => {
     return scriptStatuses;
+  });
+
+  app.get('/api/traces/:slug', async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const tracePath = await findTraceFile(slug);
+    if (!tracePath) {
+      return reply.code(404).send({ error: 'Trace not found' });
+    }
+    const traceUrl = `/api/traces/file/${encodeURIComponent(tracePath)}`;
+    return {
+      slug,
+      tracePath,
+      traceUrl
+    };
+  });
+
+  app.get('/api/traces/file/*', async (req, reply) => {
+    const wildcard = (req.params as any)['*'];
+    if (!wildcard) {
+      return reply.code(400).send({ error: 'File path required' });
+    }
+    const safePath = path.normalize(decodeURIComponent(wildcard)).replace(/^(\.\.[\/\\])+/, '');
+    const absolutePath = path.join(options.workspaceRoot, safePath);
+    try {
+      await fs.access(absolutePath);
+      const stream = createReadStream(absolutePath);
+      reply.type('application/zip');
+      return reply.send(stream);
+    } catch {
+      return reply.code(404).send({ error: 'Trace file not found' });
+    }
   });
 
   app.post('/api/runs', async (req, reply) => {
@@ -70,16 +136,44 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         });
       },
       onStatus: (status) => {
-        scriptStatuses[targetSlug] = status;
-        broadcast({
-          type: 'status',
-          slug: targetSlug,
-          status
-        });
+        if (status === 'running') {
+          scriptStatuses[targetSlug] = status;
+          broadcast({
+            type: 'status',
+            slug: targetSlug,
+            status
+          });
+        }
       }
     });
 
-    runPromise.catch((err) => {
+    runPromise.then((result) => {
+      scriptStatuses[targetSlug] = result.status;
+      if (result.status === 'failed') {
+        const traceUrl = result.tracePath ? `/api/traces/${targetSlug}` : undefined;
+        failureArtifacts[targetSlug] = {
+          error: result.error,
+          stack: result.stack,
+          tracePath: result.tracePath,
+          traceUrl
+        };
+        broadcast({
+          type: 'status',
+          slug: targetSlug,
+          status: 'failed',
+          error: result.error,
+          stack: result.stack,
+          tracePath: result.tracePath,
+          traceUrl
+        });
+      } else {
+        broadcast({
+          type: 'status',
+          slug: targetSlug,
+          status: 'passed'
+        });
+      }
+    }).catch((err) => {
       scriptStatuses[targetSlug] = 'failed';
       broadcast({
         type: 'status',
@@ -232,6 +326,68 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     return reply.send(readable);
   });
 
+  app.post('/api/healer/stream', async (req, reply) => {
+    const body = (req.body || {}) as {
+      scriptSlug?: string;
+      specSlug?: string;
+      scriptContent?: string;
+      error?: string;
+      stack?: string;
+      tracePath?: string;
+      chunkDelayMs?: number;
+    };
+
+    let scriptContent = body.scriptContent;
+    if (!scriptContent && body.scriptSlug) {
+      const script = await readScript(options.workspaceRoot, body.scriptSlug);
+      if (!script) {
+        return reply.code(404).send({ error: 'Script not found' });
+      }
+      scriptContent = script.content;
+    }
+
+    if (!scriptContent) {
+      return reply.code(400).send({ error: 'scriptSlug or scriptContent is required' });
+    }
+
+    let specMarkdown: string | undefined;
+    if (body.specSlug) {
+      const spec = await readSpec(options.workspaceRoot, body.specSlug);
+      if (spec) {
+        specMarkdown = spec.content;
+      }
+    }
+
+    const abortController = new AbortController();
+    req.raw.on('close', () => {
+      abortController.abort();
+    });
+
+    const readable = Readable.from((async function* () {
+      try {
+        for await (const chunk of healTestScriptStream({
+          scriptContent,
+          specMarkdown,
+          error: body.error,
+          stack: body.stack,
+          tracePath: body.tracePath,
+          signal: abortController.signal,
+          chunkDelayMs: body.chunkDelayMs ?? 15
+        })) {
+          yield `data: ${JSON.stringify({ chunk })}\n\n`;
+        }
+        yield `data: ${JSON.stringify({ done: true })}\n\n`;
+      } catch (err: any) {
+        yield `data: ${JSON.stringify({ error: err.message })}\n\n`;
+      }
+    })());
+
+    reply.type('text/event-stream; charset=utf-8');
+    reply.header('Cache-Control', 'no-cache');
+    reply.header('Connection', 'keep-alive');
+    return reply.send(readable);
+  });
+
   app.get('/', async (req, reply) => {
     reply.type('text/html');
     return `<!DOCTYPE html>
@@ -314,6 +470,12 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           <button id="btn-save" class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-3 py-1.5 rounded border border-slate-700 flex items-center gap-1.5 transition">
             💾 Spara (Cmd+S)
           </button>
+          <button id="tab-trace" class="bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/60 text-xs font-medium px-3 py-1.5 rounded flex items-center gap-1.5 shadow transition hidden">
+            🔍 Trace Viewer
+          </button>
+          <button id="btn-heal" class="bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium px-3 py-1.5 rounded flex items-center gap-1.5 shadow transition hidden">
+            🩺 Heal with Agent
+          </button>
           <button id="btn-generate" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium px-3 py-1.5 rounded flex items-center gap-1.5 shadow transition">
             ⚡ Generate Script
           </button>
@@ -383,6 +545,43 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           <!-- Monaco Diff Editor target -->
           <div id="monaco-diff-editor" class="flex-1 w-full h-full"></div>
         </div>
+
+        <!-- Embedded Playwright Trace Viewer Pane -->
+        <div id="trace-view" class="flex-1 flex flex-col w-full h-full hidden">
+          <div class="h-10 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-xs">
+            <div class="flex items-center gap-2">
+              <span class="text-indigo-400 font-semibold flex items-center gap-1.5">
+                <span>🔍</span> Embedded Playwright Trace Viewer
+              </span>
+              <span id="trace-filename" class="text-slate-400 font-mono text-[11px]"></span>
+            </div>
+            <button id="btn-close-trace" class="text-slate-400 hover:text-slate-200 text-xs px-2 py-1 rounded hover:bg-slate-800 flex items-center gap-1">
+              &larr; Tillbaka till editor
+            </button>
+          </div>
+          <iframe id="trace-viewer-frame" class="flex-1 w-full h-full border-0 bg-slate-950" src="about:blank"></iframe>
+        </div>
+      </div>
+
+      <!-- Test Failure Diagnostics Banner -->
+      <div id="failure-diagnostics" class="border-t border-rose-900/50 bg-rose-950/25 p-4 flex flex-col gap-2.5 hidden">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="text-rose-400 font-semibold text-xs flex items-center gap-1.5">
+              <span>⚠️</span> Testfel &amp; Körningsdiagnostik
+            </span>
+            <span id="failure-error-summary" class="text-rose-300 text-xs font-medium truncate max-w-xl"></span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="btn-diagnostics-trace" class="bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/60 text-xs font-medium px-2.5 py-1 rounded flex items-center gap-1 transition">
+              🔍 Granska Trace
+            </button>
+            <button id="btn-diagnostics-heal" class="bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium px-3 py-1 rounded shadow flex items-center gap-1.5 transition">
+              🩺 Heal with Agent
+            </button>
+          </div>
+        </div>
+        <pre id="error-stack" class="font-mono text-xs text-rose-300 bg-black/60 p-2.5 rounded max-h-32 overflow-y-auto whitespace-pre-wrap select-text"></pre>
       </div>
 
       <!-- Live Console Streaming Pane -->
@@ -593,6 +792,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           updatePreview();
         }
 
+        updateFailureUI();
         loadWorkspace();
       } catch (err) {
         alert('Kunde inte läsa spec: ' + err.message);
@@ -938,6 +1138,152 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 
     // Test Runner & WebSocket Streaming
     let runStatuses = {};
+    const failureArtifactsBySlug = {};
+    let healerAbortController = null;
+
+    function showTraceViewer() {
+      document.getElementById('split-view').classList.add('hidden');
+      document.getElementById('diff-view').classList.add('hidden');
+      document.getElementById('empty-state').classList.add('hidden');
+      document.getElementById('trace-view').classList.remove('hidden');
+    }
+
+    function showEditor() {
+      document.getElementById('trace-view').classList.add('hidden');
+      document.getElementById('diff-view').classList.add('hidden');
+      if (activeSpec) {
+        document.getElementById('split-view').classList.remove('hidden');
+      } else {
+        document.getElementById('empty-state').classList.remove('hidden');
+      }
+    }
+
+    function updateFailureUI() {
+      if (!activeSpec) return;
+      const failure = failureArtifactsBySlug[activeSpec.slug] || failureArtifactsBySlug['all'];
+      const diagEl = document.getElementById('failure-diagnostics');
+      const errSummaryEl = document.getElementById('failure-error-summary');
+      const stackEl = document.getElementById('error-stack');
+      const btnHealToolbar = document.getElementById('btn-heal');
+      const tabTrace = document.getElementById('tab-trace');
+      const frame = document.getElementById('trace-viewer-frame');
+      const traceFilename = document.getElementById('trace-filename');
+
+      if (failure) {
+        diagEl.classList.remove('hidden');
+        errSummaryEl.textContent = failure.error || 'Testfel inträffade under körning';
+        stackEl.textContent = failure.stack || failure.error || 'Ingen stacktrace fångad.';
+        btnHealToolbar.classList.remove('hidden');
+
+        if (failure.tracePath || failure.traceUrl) {
+          tabTrace.classList.remove('hidden');
+          const traceFullUrl = window.location.origin + (failure.traceUrl || '/api/traces/' + activeSpec.slug);
+          frame.src = 'https://trace.playwright.dev/?trace=' + encodeURIComponent(traceFullUrl);
+          traceFilename.textContent = failure.tracePath || 'trace.zip';
+        } else {
+          tabTrace.classList.add('hidden');
+          frame.src = 'about:blank';
+          traceFilename.textContent = '';
+        }
+      } else {
+        diagEl.classList.add('hidden');
+        btnHealToolbar.classList.add('hidden');
+        tabTrace.classList.add('hidden');
+      }
+    }
+
+    async function healWithAgent() {
+      if (!activeSpec) return;
+      initDiffEditor();
+
+      const failure = failureArtifactsBySlug[activeSpec.slug] || failureArtifactsBySlug['all'] || {};
+
+      let existingContent = '// No existing test script on disk\\n';
+      try {
+        const res = await fetch('/api/scripts/' + activeSpec.slug);
+        if (res.ok) {
+          const data = await res.json();
+          existingContent = data.content || '';
+        }
+      } catch (e) {}
+
+      originalScriptCode = existingContent;
+      stagedScriptCode = '';
+
+      document.getElementById('split-view').classList.add('hidden');
+      document.getElementById('trace-view').classList.add('hidden');
+      document.getElementById('empty-state').classList.add('hidden');
+      document.getElementById('diff-view').classList.remove('hidden');
+
+      const statusEl = document.getElementById('diff-stream-status');
+      statusEl.classList.remove('hidden');
+      statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span><span>Healer agent reparerar testskript...</span>';
+
+      const origModel = monaco.editor.createModel(originalScriptCode, 'typescript');
+      const modModel = monaco.editor.createModel('// Healer agent analyserar felstack och Playwright trace...\\n', 'typescript');
+      diffEditorInstance.setModel({
+        original: origModel,
+        modified: modModel
+      });
+
+      healerAbortController = new AbortController();
+
+      try {
+        const res = await fetch('/api/healer/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            scriptSlug: activeSpec.slug,
+            specSlug: activeSpec.slug,
+            error: failure.error,
+            stack: failure.stack,
+            tracePath: failure.tracePath
+          }),
+          signal: healerAbortController.signal
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Healer repair failed');
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const payload = JSON.parse(line.slice(6));
+              if (payload.chunk) {
+                stagedScriptCode += payload.chunk;
+                diffEditorInstance.getModel().modified.setValue(stagedScriptCode);
+              }
+              if (payload.done) {
+                statusEl.classList.add('hidden');
+              }
+              if (payload.error) {
+                alert('Healer error: ' + payload.error);
+                statusEl.classList.add('hidden');
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          alert('Healer error: ' + err.message);
+        }
+        statusEl.classList.add('hidden');
+      } finally {
+        healerAbortController = null;
+      }
+    }
 
     async function loadRunStatuses() {
       try {
@@ -987,7 +1333,19 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
             appendConsoleLog(msg.chunk, msg.stream);
           } else if (msg.type === 'status') {
             runStatuses[msg.slug] = msg.status;
+            if (msg.status === 'failed') {
+              failureArtifactsBySlug[msg.slug] = {
+                error: msg.error,
+                stack: msg.stack,
+                tracePath: msg.tracePath,
+                traceUrl: msg.traceUrl
+              };
+            } else if (msg.status === 'passed') {
+              delete failureArtifactsBySlug[msg.slug];
+            }
             renderScriptStatuses();
+            updateFailureUI();
+
             const consoleStatus = document.getElementById('console-run-status');
             if (consoleStatus) {
               consoleStatus.classList.remove('hidden');
@@ -1032,6 +1390,12 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       const consoleEl = document.getElementById('console-output');
       if (consoleEl) consoleEl.textContent = '';
     });
+
+    document.getElementById('tab-trace')?.addEventListener('click', showTraceViewer);
+    document.getElementById('btn-diagnostics-trace')?.addEventListener('click', showTraceViewer);
+    document.getElementById('btn-close-trace')?.addEventListener('click', showEditor);
+    document.getElementById('btn-heal')?.addEventListener('click', healWithAgent);
+    document.getElementById('btn-diagnostics-heal')?.addEventListener('click', healWithAgent);
 
     initRunWebSocket();
     loadRunStatuses();
