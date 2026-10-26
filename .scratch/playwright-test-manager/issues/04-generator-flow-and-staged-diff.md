@@ -4,11 +4,11 @@
 
 **Blocked by:** 03: Mock Agent & Interactive Planner Dialog
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] A "Generate Script" button in the spec view triggers the Generator agent for the current Test Spec
-- [ ] Generated test code is held in an in-memory staging state without immediately touching the filesystem
-- [ ] The UI renders a side-by-side Monaco Diff Viewer comparing the existing Test Script (or empty template) with the proposed code
-- [ ] Users can click "Apply" to commit the code to the workspace filesystem as a `.spec.ts` Test Script
-- [ ] Users can click "Reject" to discard the proposed changes without writing to disk
-- [ ] Automated tests verify the generation, diff preview, apply, and reject lifecycle
+- [x] A "Generate Script" button in the spec view triggers the Generator agent for the current Test Spec
+- [x] Generated test code is held in an in-memory staging state without immediately touching the filesystem
+- [x] The UI renders a side-by-side Monaco Diff Viewer comparing the existing Test Script (or empty template) with the proposed code
+- [x] Users can click "Apply" to commit the code to the workspace filesystem as a `.spec.ts` Test Script
+- [x] Users can click "Reject" to discard the proposed changes without writing to disk
+- [x] Automated tests verify the generation, diff preview, apply, and reject lifecycle

@@ -3,7 +3,8 @@ import cors from '@fastify/cors';
 import { Readable } from 'node:stream';
 import { scanWorkspace } from './workspace.js';
 import { readSpec, writeSpec, createSpec } from './specs.js';
-import { planTestSpecStream } from './mock-agent.js';
+import { readScript, writeScript } from './scripts.js';
+import { planTestSpecStream, generateTestScriptStream } from './mock-agent.js';
 
 export interface ServerOptions {
   workspaceRoot: string;
@@ -55,6 +56,25 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     return updated;
   });
 
+  app.get('/api/scripts/:slug', async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const script = await readScript(options.workspaceRoot, slug);
+    if (!script) {
+      return reply.code(404).send({ error: 'Script not found' });
+    }
+    return script;
+  });
+
+  app.post('/api/scripts/:slug', async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const body = (req.body || {}) as { content?: string };
+    if (typeof body.content !== 'string') {
+      return reply.code(400).send({ error: 'Content is required' });
+    }
+    const saved = await writeScript(options.workspaceRoot, slug, body.content);
+    return saved;
+  });
+
   app.post('/api/planner/stream', async (req, reply) => {
     const body = (req.body || {}) as { prompt?: string; prdContext?: string; chunkDelayMs?: number };
     if (!body.prompt || !body.prompt.trim()) {
@@ -71,6 +91,51 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         for await (const chunk of planTestSpecStream({
           prompt: body.prompt!.trim(),
           prdContext: body.prdContext?.trim(),
+          signal: abortController.signal,
+          chunkDelayMs: body.chunkDelayMs ?? 15
+        })) {
+          yield `data: ${JSON.stringify({ chunk })}\n\n`;
+        }
+        yield `data: ${JSON.stringify({ done: true })}\n\n`;
+      } catch (err: any) {
+        yield `data: ${JSON.stringify({ error: err.message })}\n\n`;
+      }
+    })());
+
+    reply.type('text/event-stream; charset=utf-8');
+    reply.header('Cache-Control', 'no-cache');
+    reply.header('Connection', 'keep-alive');
+    return reply.send(readable);
+  });
+
+  app.post('/api/generator/stream', async (req, reply) => {
+    const body = (req.body || {}) as { specSlug?: string; markdown?: string; chunkDelayMs?: number };
+    let markdown = body.markdown;
+    let title: string | undefined;
+
+    if (!markdown && body.specSlug) {
+      const spec = await readSpec(options.workspaceRoot, body.specSlug);
+      if (!spec) {
+        return reply.code(404).send({ error: 'Spec not found' });
+      }
+      markdown = spec.content;
+      title = spec.frontmatter.title || spec.name;
+    }
+
+    if (!markdown || !markdown.trim()) {
+      return reply.code(400).send({ error: 'specSlug or markdown is required' });
+    }
+
+    const abortController = new AbortController();
+    req.raw.on('close', () => {
+      abortController.abort();
+    });
+
+    const readable = Readable.from((async function* () {
+      try {
+        for await (const chunk of generateTestScriptStream({
+          specTitle: title,
+          specMarkdown: markdown!.trim(),
           signal: abortController.signal,
           chunkDelayMs: body.chunkDelayMs ?? 15
         })) {
@@ -196,6 +261,34 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
             </div>
             <div id="markdown-preview" class="flex-1 p-6 overflow-y-auto prose max-w-none text-slate-200"></div>
           </div>
+        </div>
+
+        <!-- Monaco Staged Diff View -->
+        <div id="diff-view" class="flex-1 flex flex-col w-full h-full hidden">
+          <!-- Diff Toolbar Banner -->
+          <div class="h-10 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+            <div class="flex items-center gap-3 text-xs">
+              <span class="font-semibold text-emerald-400 flex items-center gap-1.5">
+                <span>⚡</span> Staged Diff Preview
+              </span>
+              <span class="text-slate-400">|</span>
+              <span class="text-slate-400 font-mono" id="diff-filenames">Original (Disk) &harr; Proposed (In-Memory Staged)</span>
+              <span id="diff-stream-status" class="text-emerald-400 flex items-center gap-1.5 hidden">
+                <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>Generating code...</span>
+              </span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button id="btn-reject-diff" class="bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 text-xs font-medium px-3 py-1 rounded transition flex items-center gap-1">
+                ✕ Reject
+              </button>
+              <button id="btn-apply-diff" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium px-3 py-1 rounded shadow transition flex items-center gap-1">
+                ✓ Apply (Commit to Disk)
+              </button>
+            </div>
+          </div>
+          <!-- Monaco Diff Editor target -->
+          <div id="monaco-diff-editor" class="flex-1 w-full h-full"></div>
         </div>
       </div>
     </main>
@@ -350,6 +443,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         activeSpec = await res.json();
 
         document.getElementById('empty-state').classList.add('hidden');
+        document.getElementById('diff-view').classList.add('hidden');
         document.getElementById('split-view').classList.remove('hidden');
         document.getElementById('actions-bar').classList.remove('hidden');
         document.getElementById('active-badge').classList.remove('hidden');
@@ -577,6 +671,146 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       if (plannerAbortController) plannerAbortController.abort();
     });
     document.getElementById('btn-accept-plan').addEventListener('click', acceptPlan);
+
+    // Generator & Monaco Staged Diff Viewer
+    let diffEditorInstance = null;
+    let stagedScriptCode = '';
+    let originalScriptCode = '';
+    let generatorAbortController = null;
+
+    function initDiffEditor() {
+      const container = document.getElementById('monaco-diff-editor');
+      if (!container || diffEditorInstance) return;
+
+      diffEditorInstance = monaco.editor.createDiffEditor(container, {
+        originalEditable: false,
+        readOnly: true,
+        theme: 'vs-dark',
+        automaticLayout: true,
+        renderSideBySide: true,
+        fontSize: 13,
+        lineNumbers: 'on',
+        scrollBeyondLastLine: false
+      });
+    }
+
+    async function generateScript() {
+      if (!activeSpec) return;
+      initDiffEditor();
+
+      let existingContent = '// No existing test script on disk for: ' + activeSpec.slug + '\n';
+      try {
+        const res = await fetch('/api/scripts/' + activeSpec.slug);
+        if (res.ok) {
+          const data = await res.json();
+          existingContent = data.content || '';
+        }
+      } catch (e) {}
+
+      originalScriptCode = existingContent;
+      stagedScriptCode = '';
+
+      document.getElementById('split-view').classList.add('hidden');
+      document.getElementById('empty-state').classList.add('hidden');
+      document.getElementById('diff-view').classList.remove('hidden');
+
+      const statusEl = document.getElementById('diff-stream-status');
+      statusEl.classList.remove('hidden');
+
+      const origModel = monaco.editor.createModel(originalScriptCode, 'typescript');
+      const modModel = monaco.editor.createModel('// Generator agent assembling Playwright test script...\n', 'typescript');
+      diffEditorInstance.setModel({
+        original: origModel,
+        modified: modModel
+      });
+
+      generatorAbortController = new AbortController();
+
+      try {
+        const res = await fetch('/api/generator/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ specSlug: activeSpec.slug }),
+          signal: generatorAbortController.signal
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to generate script');
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const payload = JSON.parse(line.slice(6));
+              if (payload.chunk) {
+                stagedScriptCode += payload.chunk;
+                diffEditorInstance.getModel().modified.setValue(stagedScriptCode);
+              }
+              if (payload.done) {
+                statusEl.classList.add('hidden');
+              }
+              if (payload.error) {
+                alert('Generator error: ' + payload.error);
+                statusEl.classList.add('hidden');
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          alert('Generator error: ' + err.message);
+        }
+        statusEl.classList.add('hidden');
+      } finally {
+        generatorAbortController = null;
+      }
+    }
+
+    async function applyStagedDiff() {
+      if (!activeSpec || !stagedScriptCode) return;
+      try {
+        const res = await fetch('/api/scripts/' + activeSpec.slug, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: stagedScriptCode })
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to apply test script');
+        }
+        document.getElementById('diff-view').classList.add('hidden');
+        document.getElementById('split-view').classList.remove('hidden');
+        stagedScriptCode = '';
+        await loadWorkspace();
+      } catch (err) {
+        alert('Failed to apply script: ' + err.message);
+      }
+    }
+
+    function rejectStagedDiff() {
+      if (generatorAbortController) {
+        generatorAbortController.abort();
+        generatorAbortController = null;
+      }
+      stagedScriptCode = '';
+      document.getElementById('diff-view').classList.add('hidden');
+      document.getElementById('split-view').classList.remove('hidden');
+    }
+
+    document.getElementById('btn-generate').addEventListener('click', generateScript);
+    document.getElementById('btn-apply-diff').addEventListener('click', applyStagedDiff);
+    document.getElementById('btn-reject-diff').addEventListener('click', rejectStagedDiff);
   </script>
 </body>
 </html>`;
