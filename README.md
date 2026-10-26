@@ -1,145 +1,145 @@
 # Playwright Test Manager 🎭
 
-Webbaserat kontrollcenter och orkestreringslager för Playwright-tester, förstärkt med intelligenta Playwright Test Agents över Agent Client Protocol (ACP).
+Web-based control center and orchestration layer for Playwright testing augmented with intelligent Playwright Test Agents over the Agent Client Protocol (ACP).
 
-Playwright Test Manager automatiserar hela testlivscykeln – från planering av testspecifikationer till kodgenerering, testkörning med konsolströmning i realtid, inbäddad trace-analys och självreparerande tester ("Healer") – allt med en mänsklig säkerhetsspärr (Human-in-the-Loop) via Monaco Staged Diff.
-
----
-
-## ✨ Huvudfunktioner
-
-- 🚀 **Noll-konfigurations CLI**: Starta i vilken Playwright-arbetsyta som helst med ett enda kommando. Webbläsaren öppnas automatiskt.
-- 📁 **Filsystemet som sanningskälla**: Direkt synkronisering mot `specs/*.md` (Test Specs) och `tests/*.spec.ts` (Test Scripts). Full Git-kompatibilitet utan databasberoende.
-- ✨ **Interaktiv Planner**: Promptbaserad agent som genererar strukturerade Test Specs i Markdown med stöd för PRD-kontext och realtidsströmning.
-- 📝 **Split-pane Monaco Spec Editor**: Tvådelad editor med Markdown-syntaxmarkering och live-renderad förhandsgranskning.
-- ⚡ **Generator med Staged Diff**: Omvandlar Test Specs till körbara Playwright-skript med visuell "side-by-side" granskning före filskrivning (Apply/Reject).
-- ▶️ **Playwright Test Runner**: Kör enskilda testskript eller hela sviten ("Run All") med valbart körläge (Headed/Headless Mode) och WebSocket-strömmad konsolutdata.
-- 🔍 **Inbäddad Trace Viewer**: Granska Playwright-körningsspår (`trace.zip`) direkt i applikationens gränssnitt vid testfel.
-- 🩺 **Healer Loop**: Ett klick på "Heal with Agent" skickar felstack, spår och källkod till Healer-agenten, som syntetiserar en riktad lagning och visar diffen för godkännande innan testet verifieras på nytt.
-- 🤖 **Inbyggd Mock Agent**: Full funktionalitet för utveckling, demonstration och automatiska tester offline utan externa API-nycklar.
+Playwright Test Manager automates the complete test lifecycle—from planning test specifications to synthesizing test code, executing tests with real-time console streaming, embedded trace analysis, and self-healing test repairs ("Healer")—all safeguarded by a human-in-the-loop review workflow via Monaco Staged Diffs.
 
 ---
 
-## 🚀 Snabbstart
+## ✨ Key Features
 
-### Förutsättningar
+- 🚀 **Zero-Config CLI**: Launch in any Playwright target workspace with a single command. Opens automatically in your default browser.
+- 📁 **Filesystem as Source of Truth**: Direct synchronization with `specs/*.md` (Test Specs) and `tests/*.spec.ts` (Test Scripts). Full Git compatibility without database overhead.
+- ✨ **Interactive Planner**: Natural language prompt-based agent that generates structured Test Specs in Markdown with streaming output and PRD context support.
+- 📝 **Split-Pane Monaco Spec Editor**: Dual-pane editor with Markdown syntax highlighting and live rendered preview.
+- ⚡ **Generator with Staged Diff**: Synthesizes executable Playwright code from Test Specs with side-by-side Monaco diff inspection prior to disk writes (Apply/Reject).
+- ▶️ **Playwright Test Runner**: Run individual Test Scripts or the entire test suite ("Run All") with toggles for Headed vs. Headless Mode and live WebSocket-streamed console logs.
+- 🔍 **Embedded Trace Viewer**: Inspect Playwright execution traces (`trace.zip`) directly inside the application UI upon test failure.
+- 🩺 **Healer Loop**: A single-click "Heal with Agent" flow feeds error stacks, traces, and source code to the Healer agent, staging targeted repairs in a diff view before re-running to verify.
+- 🤖 **Built-in Mock Agent**: Deterministic, offline testing and development with zero API costs and no external credentials required.
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
 
 - **Node.js** (v18+)
-- **Playwright** i målarbetsytan
+- **Playwright** installed in the target workspace
 
-### Installation & Utveckling
+### Installation & Development
 
 ```bash
-# Klona repot och installera beroenden
+# Clone the repository and install dependencies
 git clone <repo-url>
 cd playwright-test-manager
 npm install
 
-# Bygg TypeScript
+# Build TypeScript
 npm run build
 
-# Kör testerna (Vitest)
+# Run automated tests (Vitest)
 npm test
 
-# Starta utvecklingsserver
+# Start development server
 npm run dev
 ```
 
-### Kör via CLI
+### Running via CLI
 
-Starta Playwright Test Manager mot en valfri arbetskatalog:
+Launch Playwright Test Manager against any target workspace directory:
 
 ```bash
-# Starta i aktuell mapp
+# Launch in the current directory
 npx tsx src/cli.ts
 
-# Eller mot en specifik arbetskatalog
-npx tsx src/cli.ts /sökväg/till/ditt-playwright-projekt
+# Or target a specific workspace directory
+npx tsx src/cli.ts /path/to/playwright-project
 
-# Anpassa port och stäng av automatisk webbläsaröppning
+# Customize port and disable automatic browser opening
 npx tsx src/cli.ts --port 5000 --no-open
 ```
 
-### CLI-flaggor
+### CLI Flags
 
-| Flagga | Beskrivning | Standard |
+| Flag | Description | Default |
 | :--- | :--- | :--- |
-| `[path]` | Sökväg till Playwright-arbetsytan | `process.cwd()` |
-| `--port <nummer>` | HTTP-port för kontrollcentret | `4321` |
-| `--host <adress>` | Nätverksvärd | `localhost` |
-| `--no-open` | Öppna inte standardwebbläsaren automatiskt vid start | `false` |
+| `[path]` | Path to target Playwright workspace root | `process.cwd()` |
+| `--port <number>` | HTTP port for the web interface | `4321` |
+| `--host <string>` | Host address to bind to | `localhost` |
+| `--no-open` | Prevent automatic opening of default browser | `false` |
 
 ---
 
-## 📂 Katalogstruktur & Konventioner
+## 📂 Directory Structure & Conventions
 
-Playwright Test Manager förväntar sig och organiserar filer enligt följande struktur i målarbetsytan:
+Playwright Test Manager operates directly on standard filesystem conventions within your target workspace:
 
 ```text
-arbetsyta/
-├── specs/                   # Test Specs i Markdown med frontmatter
+workspace/
+├── specs/                   # Markdown Test Specs with YAML frontmatter
 │   ├── auth-login.md
 │   └── checkout-flow.md
-├── tests/                   # Körbara Playwright-testskript
+├── tests/                   # Executable Playwright test scripts
 │   ├── auth-login.spec.ts
 │   └── checkout-flow.spec.ts
-└── test-results/            # Körningsartefakter och Playwright trace.zip
+└── test-results/            # Execution artifacts and Playwright trace.zip
     └── checkout-flow/
         └── trace.zip
 ```
 
 ---
 
-## 🔄 Arbetsflöde & Arkitektur
+## 🔄 Workflow & Architecture
 
 ```mermaid
 flowchart LR
-    A["✨ Planner"] -->|"Genererar Spec"| B["specs/*.md"]
-    B -->|"Redigera & förhandsgranska"| C["Monaco Editor"]
+    A["✨ Planner"] -->|"Generates Spec"| B["specs/*.md"]
+    B -->|"Edit & Preview"| C["Monaco Editor"]
     C -->|"⚡ Generator"| D["Staged Diff"]
     D -->|"✓ Apply"| E["tests/*.spec.ts"]
-    E -->|"▶ Run Playwright"| F{"Testresultat"}
-    F -->|"✓ Passed"| G["Klar / Grön status"]
+    E -->|"▶ Run Playwright"| F{"Test Result"}
+    F -->|"✓ Passed"| G["Done / Green Status"]
     F -->|"✕ Failed"| H["🔍 Trace & Error Stack"]
     H -->|"🩺 Heal with Agent"| D
 ```
 
-1. **Planera**: Ange krav eller användarscenarier. Plannern strömmar en strukturerad Markdown-specifikation med mål, teststeg och assertioner.
-2. **Redigera**: Justera specifikationen i den tvådelade editorn med omedelbar rendering.
-3. **Generera & Granska**: Generatorn skapar Playwright-kod som placeras i en isolerad in-memory diff. Granska skillnaderna och klicka på **Apply** för att spara till disk.
-4. **Kör**: Exekvera enskilda tester eller hela sviten. Se teststeg och konsolutdata strömmas i realtid.
-5. **Felsök & Reparera**: Vid fel visas felstacken och en inbäddad Trace Viewer öppnas. Klicka på **Heal with Agent** för att generera en automatisk reparation som ställs upp i en ny Staged Diff.
+1. **Plan**: Provide natural language goals or requirements. The Planner streams a structured Markdown spec with objectives, steps, and assertions.
+2. **Refine**: Edit specs in the split-screen Monaco editor with immediate live rendering.
+3. **Generate & Review**: The Generator synthesizes Playwright test code held in an isolated in-memory Staged Diff. Review differences and click **Apply** to commit to disk.
+4. **Execute**: Run individual tests or the full suite in Headed or Headless mode while watching real-time console streaming.
+5. **Diagnose & Heal**: On failure, error stacks and an embedded Trace Viewer open immediately. Click **Heal with Agent** to generate a targeted fix presented in a Staged Diff before verifying the fix.
 
 ---
 
-## 🧪 Testning & Kvalitetssäkring
+## 🧪 Testing & Quality Assurance
 
-Projektet utvecklas strikt med testdriven utveckling (TDD) över väldefinierade sömmar (seams):
+Developed test-first using strict Test-Driven Development (TDD) across pre-agreed seams:
 
 ```bash
-# Kör hela testsviten (unit- och integrationstester)
+# Run all unit and integration tests
 npm test
 
-# Kör i bevakningsläge
+# Run tests in watch mode
 npm run test:watch
 ```
 
-Testsviten täcker:
-- **Runner Engine**: Processhantering, stdout/stderr-fångst, `--headed` och felartefakter (`trace.zip`).
-- **Mock Agent**: Determinisk strömning och avbrytning för Planner, Generator och Healer.
-- **Fastify & WebSocket API**: REST-endpoints, Server-Sent Events (SSE) och realtidsstatus via WebSockets.
-- **UI & Staging Lifecycle**: Monaco-integration, diff-stadiets isolering och fullständiga livscykeltester.
+The test suite covers:
+- **Runner Engine**: Child process execution, stdout/stderr capture, `--headed` flag handling, and failure artifact discovery (`trace.zip`).
+- **Mock Agent**: Deterministic streaming and cancellation for Planner, Generator, and Healer agents.
+- **Fastify & WebSocket API**: REST endpoints, Server-Sent Events (SSE), and live WebSocket run status broadcasting.
+- **UI & Staging Lifecycle**: Monaco editor integration, staged diff isolation, and end-to-end failure/healing/re-run cycles.
 
 ---
 
-## 📖 Begrepp & Domänordlista
+## 📖 Domain Vocabulary & Architectural Decisions
 
-För fullständig vokabulär och arkitektoniska beslut, se:
-- [`GLOSSARY.md`](file:///Users/joel/kod/app-ideas/playwright-test-manager/GLOSSARY.md) – Definitioner av Test Spec, Test Script, Planner, Generator, Healer, Staged Diff m.fl.
-- `docs/adr/` – Arkitektoniska beslut (Filsystem som sanningskälla, ACP, inbäddad trace viewer, staged diffs).
+For full terminology definitions and architectural records, see:
+- [`GLOSSARY.md`](file:///Users/joel/kod/app-ideas/playwright-test-manager/GLOSSARY.md) – Formal definitions of Test Spec, Test Script, Planner, Generator, Healer, Staged Diff, etc.
+- `docs/adr/` – Architecture Decision Records (Filesystem as Source of Truth, ACP, Embedded Trace Viewer, Staged Diffs).
 
 ---
 
-## 📄 Licens
+## 📄 License
 
 [MIT](LICENSE)
