@@ -10,6 +10,8 @@ import { readSpec, writeSpec, createSpec } from './specs.js';
 import { readScript, writeScript } from './scripts.js';
 import { planTestSpecStream, generateTestScriptStream, healTestScriptStream } from './mock-agent.js';
 import { runPlaywright } from './runner.js';
+import { getSettings, saveSettings } from './settings.js';
+import { AcpClient } from './acp-client.js';
 
 export interface ServerOptions {
   workspaceRoot: string;
@@ -74,6 +76,16 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     socket.on('close', () => {
       activeSockets.delete(socket);
     });
+  });
+
+  app.get('/api/settings', async () => {
+    return await getSettings(options.workspaceRoot);
+  });
+
+  app.post('/api/settings', async (req, reply) => {
+    const body = (req.body || {}) as any;
+    const updated = await saveSettings(options.workspaceRoot, body);
+    return updated;
   });
 
   app.get('/api/runs/status', async () => {
@@ -259,15 +271,37 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       abortController.abort();
     });
 
+    const settings = await getSettings(options.workspaceRoot);
+
     const readable = Readable.from((async function* () {
       try {
-        for await (const chunk of planTestSpecStream({
-          prompt: body.prompt!.trim(),
-          prdContext: body.prdContext?.trim(),
-          signal: abortController.signal,
-          chunkDelayMs: body.chunkDelayMs ?? 15
-        })) {
-          yield `data: ${JSON.stringify({ chunk })}\n\n`;
+        if (settings.agentType === 'acp' && settings.acpCommand) {
+          const client = new AcpClient({
+            command: settings.acpCommand,
+            args: settings.acpArgs,
+            workspaceRoot: options.workspaceRoot
+          });
+          for await (const chunk of client.streamTask({
+            role: 'planner',
+            prompt: body.prompt!.trim(),
+            context: {
+              prdContext: body.prdContext?.trim(),
+              baseUrl: settings.baseUrl,
+              seedTestPath: settings.seedTestPath
+            },
+            signal: abortController.signal
+          })) {
+            yield `data: ${JSON.stringify({ chunk })}\n\n`;
+          }
+        } else {
+          for await (const chunk of planTestSpecStream({
+            prompt: body.prompt!.trim(),
+            prdContext: body.prdContext?.trim(),
+            signal: abortController.signal,
+            chunkDelayMs: body.chunkDelayMs ?? 15
+          })) {
+            yield `data: ${JSON.stringify({ chunk })}\n\n`;
+          }
         }
         yield `data: ${JSON.stringify({ done: true })}\n\n`;
       } catch (err: any) {
@@ -304,15 +338,38 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       abortController.abort();
     });
 
+    const settings = await getSettings(options.workspaceRoot);
+
     const readable = Readable.from((async function* () {
       try {
-        for await (const chunk of generateTestScriptStream({
-          specTitle: title,
-          specMarkdown: markdown!.trim(),
-          signal: abortController.signal,
-          chunkDelayMs: body.chunkDelayMs ?? 15
-        })) {
-          yield `data: ${JSON.stringify({ chunk })}\n\n`;
+        if (settings.agentType === 'acp' && settings.acpCommand) {
+          const client = new AcpClient({
+            command: settings.acpCommand,
+            args: settings.acpArgs,
+            workspaceRoot: options.workspaceRoot
+          });
+          for await (const chunk of client.streamTask({
+            role: 'generator',
+            prompt: `Generate Playwright test script for spec: ${title || 'Test Spec'}`,
+            context: {
+              specTitle: title,
+              specMarkdown: markdown!.trim(),
+              baseUrl: settings.baseUrl,
+              seedTestPath: settings.seedTestPath
+            },
+            signal: abortController.signal
+          })) {
+            yield `data: ${JSON.stringify({ chunk })}\n\n`;
+          }
+        } else {
+          for await (const chunk of generateTestScriptStream({
+            specTitle: title,
+            specMarkdown: markdown!.trim(),
+            signal: abortController.signal,
+            chunkDelayMs: body.chunkDelayMs ?? 15
+          })) {
+            yield `data: ${JSON.stringify({ chunk })}\n\n`;
+          }
         }
         yield `data: ${JSON.stringify({ done: true })}\n\n`;
       } catch (err: any) {
@@ -363,18 +420,44 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       abortController.abort();
     });
 
+    const settings = await getSettings(options.workspaceRoot);
+
     const readable = Readable.from((async function* () {
       try {
-        for await (const chunk of healTestScriptStream({
-          scriptContent,
-          specMarkdown,
-          error: body.error,
-          stack: body.stack,
-          tracePath: body.tracePath,
-          signal: abortController.signal,
-          chunkDelayMs: body.chunkDelayMs ?? 15
-        })) {
-          yield `data: ${JSON.stringify({ chunk })}\n\n`;
+        if (settings.agentType === 'acp' && settings.acpCommand) {
+          const client = new AcpClient({
+            command: settings.acpCommand,
+            args: settings.acpArgs,
+            workspaceRoot: options.workspaceRoot
+          });
+          for await (const chunk of client.streamTask({
+            role: 'healer',
+            prompt: 'Heal failing Playwright test script',
+            context: {
+              scriptContent,
+              specMarkdown,
+              error: body.error,
+              stack: body.stack,
+              tracePath: body.tracePath,
+              baseUrl: settings.baseUrl,
+              seedTestPath: settings.seedTestPath
+            },
+            signal: abortController.signal
+          })) {
+            yield `data: ${JSON.stringify({ chunk })}\n\n`;
+          }
+        } else {
+          for await (const chunk of healTestScriptStream({
+            scriptContent,
+            specMarkdown,
+            error: body.error,
+            stack: body.stack,
+            tracePath: body.tracePath,
+            signal: abortController.signal,
+            chunkDelayMs: body.chunkDelayMs ?? 15
+          })) {
+            yield `data: ${JSON.stringify({ chunk })}\n\n`;
+          }
         }
         yield `data: ${JSON.stringify({ done: true })}\n\n`;
       } catch (err: any) {
@@ -415,6 +498,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         <h1 class="font-bold text-base text-emerald-400 flex items-center gap-2">
           <span>🎭</span> Playwright Test Manager
         </h1>
+        <button id="btn-settings" class="text-slate-400 hover:text-slate-200 text-sm p-1 rounded hover:bg-slate-800 transition" title="Project Settings">
+          ⚙️
+        </button>
       </div>
       <div class="p-3 text-xs text-slate-400 border-b border-slate-800 flex items-center justify-between">
         <span class="truncate" title="${options.workspaceRoot}">📁 ${options.workspaceRoot}</span>
@@ -462,6 +548,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       <!-- Toolbar -->
       <header class="h-14 border-b border-slate-800 px-6 flex items-center justify-between bg-slate-900/30">
         <div class="flex items-center gap-3">
+          <span id="active-agent-badge" class="px-2 py-0.5 text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded">Agent: Mock</span>
           <span id="active-badge" class="px-2 py-0.5 text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded hidden">Spec</span>
           <h2 id="active-title" class="font-medium text-slate-200">Välj en Test Spec för att redigera eller generera kod</h2>
           <span id="save-status" class="text-xs text-slate-400 ml-2"></span>
@@ -654,6 +741,75 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         </button>
         <button id="btn-accept-plan" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium px-4 py-2 rounded shadow transition hidden">
           ✓ Acceptera & Spara som Test Spec
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project Settings Modal -->
+  <div id="settings-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-xl flex flex-col shadow-2xl overflow-hidden">
+      <!-- Modal Header -->
+      <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
+        <div class="flex items-center gap-2">
+          <span class="text-lg">⚙️</span>
+          <h3 class="font-semibold text-slate-100 text-base">Project Settings</h3>
+        </div>
+        <button id="settings-close-btn" class="text-slate-400 hover:text-slate-200 text-xl leading-none p-1">&times;</button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="p-6 space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+            Base URL
+          </label>
+          <input id="settings-base-url" type="text" placeholder="http://localhost:3000" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono">
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+            Seed Test Path
+          </label>
+          <input id="settings-seed-test" type="text" placeholder="tests/seed.spec.ts" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono">
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+            Agent Provider
+          </label>
+          <select id="settings-agent-type" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none focus:border-emerald-500">
+            <option value="mock">Built-in Mock Agent (Offline / Deterministic)</option>
+            <option value="acp">External ACP Agent (JSON-RPC stdio subprocess)</option>
+          </select>
+        </div>
+
+        <div id="settings-acp-fields" class="space-y-4 p-3 bg-slate-950/60 border border-slate-800/80 rounded-lg">
+          <div>
+            <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+              ACP Agent CLI Command
+            </label>
+            <input id="settings-acp-command" type="text" placeholder="e.g. claude-code or npx" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono">
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+              ACP Agent CLI Arguments (space-separated)
+            </label>
+            <input id="settings-acp-args" type="text" placeholder="e.g. --acp" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono">
+          </div>
+        </div>
+
+        <div id="settings-status" class="text-xs font-medium text-emerald-400"></div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="px-6 py-3 border-t border-slate-800 bg-slate-900/60 flex items-center justify-end gap-2">
+        <button id="settings-cancel-btn" class="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium px-4 py-2 rounded transition">
+          Cancel
+        </button>
+        <button id="settings-save-btn" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium px-4 py-2 rounded shadow transition">
+          Save Settings
         </button>
       </div>
     </div>
@@ -1397,8 +1553,78 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     document.getElementById('btn-heal')?.addEventListener('click', healWithAgent);
     document.getElementById('btn-diagnostics-heal')?.addEventListener('click', healWithAgent);
 
+    async function loadSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        if (!res.ok) return;
+        const cfg = await res.json();
+        const baseUrlEl = document.getElementById('settings-base-url');
+        const seedTestEl = document.getElementById('settings-seed-test');
+        const agentTypeEl = document.getElementById('settings-agent-type');
+        const acpCommandEl = document.getElementById('settings-acp-command');
+        const acpArgsEl = document.getElementById('settings-acp-args');
+        const activeBadgeEl = document.getElementById('active-agent-badge');
+
+        if (baseUrlEl) baseUrlEl.value = cfg.baseUrl || '';
+        if (seedTestEl) seedTestEl.value = cfg.seedTestPath || '';
+        if (agentTypeEl) agentTypeEl.value = cfg.agentType || 'mock';
+        if (acpCommandEl) acpCommandEl.value = cfg.acpCommand || '';
+        if (acpArgsEl) acpArgsEl.value = Array.isArray(cfg.acpArgs) ? cfg.acpArgs.join(' ') : (cfg.acpArgs || '');
+
+        if (activeBadgeEl) {
+          activeBadgeEl.textContent = cfg.agentType === 'acp' ? 'Agent: External ACP' : 'Agent: Mock';
+          activeBadgeEl.className = cfg.agentType === 'acp'
+            ? 'px-2 py-0.5 text-xs font-semibold bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded'
+            : 'px-2 py-0.5 text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded';
+        }
+      } catch (e) {}
+    }
+
+    async function saveSettingsFromUI() {
+      const baseUrl = document.getElementById('settings-base-url')?.value.trim();
+      const seedTestPath = document.getElementById('settings-seed-test')?.value.trim();
+      const agentType = document.getElementById('settings-agent-type')?.value;
+      const acpCommand = document.getElementById('settings-acp-command')?.value.trim();
+      const acpArgsRaw = document.getElementById('settings-acp-args')?.value.trim() || '';
+      const acpArgs = acpArgsRaw ? acpArgsRaw.split(/\\s+/) : [];
+      const statusEl = document.getElementById('settings-status');
+
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl, seedTestPath, agentType, acpCommand, acpArgs })
+        });
+        if (res.ok) {
+          if (statusEl) {
+            statusEl.textContent = 'Inställningar sparade!';
+            setTimeout(() => { statusEl.textContent = ''; }, 2000);
+          }
+          await loadSettings();
+          setTimeout(() => {
+            document.getElementById('settings-modal')?.classList.add('hidden');
+          }, 500);
+        }
+      } catch (e) {
+        if (statusEl) statusEl.textContent = 'Kunde inte spara inställningar';
+      }
+    }
+
+    document.getElementById('btn-settings')?.addEventListener('click', () => {
+      loadSettings();
+      document.getElementById('settings-modal')?.classList.remove('hidden');
+    });
+    document.getElementById('settings-close-btn')?.addEventListener('click', () => {
+      document.getElementById('settings-modal')?.classList.add('hidden');
+    });
+    document.getElementById('settings-cancel-btn')?.addEventListener('click', () => {
+      document.getElementById('settings-modal')?.classList.add('hidden');
+    });
+    document.getElementById('settings-save-btn')?.addEventListener('click', saveSettingsFromUI);
+
     initRunWebSocket();
     loadRunStatuses();
+    loadSettings();
   </script>
 </body>
 </html>`;
