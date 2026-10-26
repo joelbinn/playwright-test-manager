@@ -36,6 +36,10 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Local scratch / test directories
+slask/
+.playwright-manager.json
+
 # IDE & Editor files
 .idea/
 *.swp
