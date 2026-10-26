@@ -135,8 +135,8 @@ The test suite covers:
 ## 📖 Domain Vocabulary & Architectural Decisions
 
 For full terminology definitions and architectural records, see:
-- [`GLOSSARY.md`](file:///Users/joel/kod/app-ideas/playwright-test-manager/GLOSSARY.md) – Formal definitions of Test Spec, Test Script, Planner, Generator, Healer, Staged Diff, etc.
-- `docs/adr/` – Architecture Decision Records (Filesystem as Source of Truth, ACP, Embedded Trace Viewer, Staged Diffs).
+- [`GLOSSARY.md`](GLOSSARY.md) – Formal definitions of Test Spec, Test Script, Planner, Generator, Healer, Staged Diff, etc.
+- [`docs/adr/`](docs/adr/) – Architecture Decision Records (Filesystem as Source of Truth, ACP, Embedded Trace Viewer, Staged Diffs).
 
 ---
 
