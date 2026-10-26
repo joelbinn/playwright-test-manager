@@ -4,11 +4,11 @@
 
 **Blocked by:** 01: Project Scaffold, CLI Entrypoint & Workspace Explorer
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Selecting a Test Spec in the sidebar loads its contents into the editor
-- [ ] Editing Markdown updates the rendered preview in real time
-- [ ] Users can save spec changes back to the workspace filesystem via a save action / keyboard shortcut
-- [ ] Users can create a new blank Test Spec with a unique name directly from the UI
-- [ ] Frontmatter metadata (title, description, tags) is parsed and cleanly presented alongside the markdown body
-- [ ] Automated tests verify reading, creating, and saving Test Specs through the backend API
+- [x] Selecting a Test Spec in the sidebar loads its contents into the editor
+- [x] Editing Markdown updates the rendered preview in real time
+- [x] Users can save spec changes back to the workspace filesystem via a save action / keyboard shortcut
+- [x] Users can create a new blank Test Spec with a unique name directly from the UI
+- [x] Frontmatter metadata (title, description, tags) is parsed and cleanly presented alongside the markdown body
+- [x] Automated tests verify reading, creating, and saving Test Specs through the backend API
