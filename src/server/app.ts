@@ -1,10 +1,12 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import websocket from '@fastify/websocket';
 import { Readable } from 'node:stream';
 import { scanWorkspace } from './workspace.js';
 import { readSpec, writeSpec, createSpec } from './specs.js';
 import { readScript, writeScript } from './scripts.js';
 import { planTestSpecStream, generateTestScriptStream } from './mock-agent.js';
+import { runPlaywright } from './runner.js';
 
 export interface ServerOptions {
   workspaceRoot: string;
@@ -16,6 +18,83 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
   });
 
   await app.register(cors, { origin: true });
+  await app.register(websocket);
+
+  const scriptStatuses: Record<string, 'passed' | 'failed' | 'running'> = {};
+  const activeSockets = new Set<any>();
+
+  function broadcast(message: any) {
+    const data = JSON.stringify(message);
+    for (const socket of activeSockets) {
+      if (socket.readyState === 1 /* WebSocket.OPEN */) {
+        try {
+          socket.send(data);
+        } catch (e) {}
+      }
+    }
+  }
+
+  app.get('/ws/runs', { websocket: true }, (socket) => {
+    activeSockets.add(socket);
+    socket.on('close', () => {
+      activeSockets.delete(socket);
+    });
+  });
+
+  app.get('/api/runs/status', async () => {
+    return scriptStatuses;
+  });
+
+  app.post('/api/runs', async (req, reply) => {
+    const body = (req.body || {}) as { slug?: string; headed?: boolean; command?: string };
+    const targetSlug = body.slug || 'all';
+
+    scriptStatuses[targetSlug] = 'running';
+    broadcast({
+      type: 'status',
+      slug: targetSlug,
+      status: 'running'
+    });
+
+    const runPromise = runPlaywright({
+      workspaceRoot: options.workspaceRoot,
+      scriptSlug: body.slug,
+      headed: body.headed,
+      command: body.command,
+      onLog: (chunk, stream) => {
+        broadcast({
+          type: 'log',
+          slug: targetSlug,
+          chunk,
+          stream
+        });
+      },
+      onStatus: (status) => {
+        scriptStatuses[targetSlug] = status;
+        broadcast({
+          type: 'status',
+          slug: targetSlug,
+          status
+        });
+      }
+    });
+
+    runPromise.catch((err) => {
+      scriptStatuses[targetSlug] = 'failed';
+      broadcast({
+        type: 'status',
+        slug: targetSlug,
+        status: 'failed',
+        error: err.message
+      });
+    });
+
+    return {
+      runId: 'run-' + Date.now(),
+      slug: targetSlug,
+      status: 'running'
+    };
+  });
 
   app.get('/api/workspace', async () => {
     return await scanWorkspace(options.workspaceRoot);
@@ -203,7 +282,18 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         </div>
 
         <div>
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Test Scripts (.spec.ts)</h2>
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Test Scripts (.spec.ts)</h2>
+            <button id="btn-run-all" class="text-xs bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded font-medium flex items-center gap-1 transition">
+              ▶ Run All
+            </button>
+          </div>
+          <div class="mb-2">
+            <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+              <input type="checkbox" id="toggle-headed" class="rounded bg-slate-900 border-slate-700 text-emerald-500 focus:ring-0">
+              <span>Headed Mode</span>
+            </label>
+          </div>
           <ul id="scripts-list" class="space-y-1 text-sm text-slate-300">
             <li class="text-slate-500 italic p-2">Laddar skript...</li>
           </ul>
@@ -226,6 +316,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           </button>
           <button id="btn-generate" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium px-3 py-1.5 rounded flex items-center gap-1.5 shadow transition">
             ⚡ Generate Script
+          </button>
+          <button id="btn-run-test" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium px-3 py-1.5 rounded flex items-center gap-1.5 shadow transition">
+            ▶ Run Test
           </button>
         </div>
       </header>
@@ -290,6 +383,20 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           <!-- Monaco Diff Editor target -->
           <div id="monaco-diff-editor" class="flex-1 w-full h-full"></div>
         </div>
+      </div>
+
+      <!-- Live Console Streaming Pane -->
+      <div id="console-pane" class="h-48 border-t border-slate-800 bg-slate-950 flex flex-col">
+        <div class="h-8 px-4 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs">
+          <div class="flex items-center gap-2">
+            <span class="text-slate-400 font-mono">📟 Console Stream</span>
+            <span id="console-run-status" class="px-2 py-0.5 text-[10px] font-semibold rounded bg-slate-800 text-slate-400 hidden status-badge">Idle</span>
+          </div>
+          <button id="btn-clear-console" class="text-slate-400 hover:text-slate-200 text-xs px-2 py-0.5 rounded hover:bg-slate-800">
+            Clear
+          </button>
+        </div>
+        <pre id="console-output" class="flex-1 p-3 font-mono text-xs text-slate-300 overflow-y-auto whitespace-pre-wrap select-text bg-black/40"></pre>
       </div>
     </main>
   </div>
@@ -424,12 +531,29 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         if (data.scripts.length === 0) {
           scriptsList.innerHTML = '<li class="text-slate-500 italic p-2">Inga skript funna</li>';
         } else {
-          scriptsList.innerHTML = data.scripts.map(s => \`
-            <li class="p-2 rounded hover:bg-slate-800/80 cursor-pointer flex items-center gap-2 text-slate-400">
-              <span class="w-2 h-2 rounded-full bg-blue-500 shrink-0"></span>
-              <span class="truncate">\${s.name}</span>
+          scriptsList.innerHTML = data.scripts.map(s => {
+            const st = runStatuses[s.slug];
+            const badgeClass = st === 'passed' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
+                               st === 'failed' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' :
+                               st === 'running' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse' :
+                               'hidden';
+            return \`
+            <li class="p-2 rounded hover:bg-slate-800/80 cursor-pointer flex items-center justify-between text-slate-300 group transition">
+              <div class="flex items-center gap-2 truncate">
+                <span class="w-2 h-2 rounded-full bg-blue-500 shrink-0"></span>
+                <span class="truncate">\${s.name}</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span id="status-badge-\${s.slug}" class="status-badge text-[10px] px-1.5 py-0.5 rounded font-semibold \${badgeClass}">
+                  \${(st || '').toUpperCase()}
+                </span>
+                <button onclick="event.stopPropagation(); triggerRun('\${s.slug}')" class="opacity-0 group-hover:opacity-100 text-[10px] bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 rounded border border-slate-700 text-slate-300">
+                  ▶
+                </button>
+              </div>
             </li>
-          \`).join('');
+          \`;
+          }).join('');
         }
       } catch (err) {
         console.error('Failed to load workspace:', err);
@@ -811,6 +935,106 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     document.getElementById('btn-generate').addEventListener('click', generateScript);
     document.getElementById('btn-apply-diff').addEventListener('click', applyStagedDiff);
     document.getElementById('btn-reject-diff').addEventListener('click', rejectStagedDiff);
+
+    // Test Runner & WebSocket Streaming
+    let runStatuses = {};
+
+    async function loadRunStatuses() {
+      try {
+        const res = await fetch('/api/runs/status');
+        if (res.ok) {
+          runStatuses = await res.json();
+          renderScriptStatuses();
+        }
+      } catch (e) {}
+    }
+
+    function renderScriptStatuses() {
+      for (const [slug, status] of Object.entries(runStatuses)) {
+        const badge = document.getElementById('status-badge-' + slug);
+        if (badge) {
+          badge.className = 'status-badge text-[10px] px-1.5 py-0.5 rounded font-semibold ' +
+            (status === 'passed' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
+             status === 'failed' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' :
+             status === 'running' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse' :
+             'hidden');
+          badge.textContent = status.toUpperCase();
+        }
+      }
+    }
+
+    function appendConsoleLog(chunk, stream) {
+      const consoleEl = document.getElementById('console-output');
+      if (!consoleEl) return;
+      const span = document.createElement('span');
+      if (stream === 'stderr') {
+        span.className = 'text-rose-400';
+      }
+      span.textContent = chunk;
+      consoleEl.appendChild(span);
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+
+    function initRunWebSocket() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = \`\${protocol}//\${window.location.host}/ws/runs\`;
+      const ws = new WebSocket(wsUrl);
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'log') {
+            appendConsoleLog(msg.chunk, msg.stream);
+          } else if (msg.type === 'status') {
+            runStatuses[msg.slug] = msg.status;
+            renderScriptStatuses();
+            const consoleStatus = document.getElementById('console-run-status');
+            if (consoleStatus) {
+              consoleStatus.classList.remove('hidden');
+              consoleStatus.textContent = \`\${msg.slug}: \${msg.status.toUpperCase()}\`;
+              consoleStatus.className = 'status-badge px-2 py-0.5 text-[10px] font-semibold rounded ' +
+                (msg.status === 'passed' ? 'bg-emerald-500/20 text-emerald-300' :
+                 msg.status === 'failed' ? 'bg-rose-500/20 text-rose-300' :
+                 'bg-amber-500/20 text-amber-300 animate-pulse');
+            }
+          }
+        } catch (e) {}
+      };
+
+      ws.onclose = () => {
+        setTimeout(initRunWebSocket, 3000);
+      };
+    }
+
+    async function triggerRun(slug) {
+      const headed = document.getElementById('toggle-headed')?.checked || false;
+      const consoleEl = document.getElementById('console-output');
+      if (consoleEl) {
+        appendConsoleLog(\`\\n[PTM] Starting test run (\${slug || 'all'}, headed: \${headed})...\\n\`, 'stdout');
+      }
+      try {
+        await fetch('/api/runs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slug, headed })
+        });
+      } catch (err) {
+        appendConsoleLog(\`[PTM Error] Failed to trigger run: \${err.message}\\n\`, 'stderr');
+      }
+    }
+
+    window.triggerRun = triggerRun;
+    document.getElementById('btn-run-all')?.addEventListener('click', () => triggerRun());
+    document.getElementById('btn-run-test')?.addEventListener('click', () => {
+      if (activeSpec) triggerRun(activeSpec.slug);
+    });
+    document.getElementById('btn-clear-console')?.addEventListener('click', () => {
+      const consoleEl = document.getElementById('console-output');
+      if (consoleEl) consoleEl.textContent = '';
+    });
+
+    initRunWebSocket();
+    loadRunStatuses();
   </script>
 </body>
 </html>`;

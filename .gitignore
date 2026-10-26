@@ -6,6 +6,7 @@ node_modules/
 dist/
 build/
 out/
+*.tsbuildinfo
 
 # Playwright artifacts & test results
 test-results/
