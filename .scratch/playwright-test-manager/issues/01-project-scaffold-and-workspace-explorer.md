@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Running the CLI command in a target directory starts the backend server and serves the frontend dashboard
-- [ ] Passing a custom directory path as a CLI argument targets that specific workspace
-- [ ] The UI scans and lists all existing Test Specs from the workspace specs directory
-- [ ] The UI scans and lists all existing Test Scripts from the workspace tests directory
-- [ ] Tests verify that the CLI command launches the server and returns the discovered workspace files over the API
+- [x] Running the CLI command in a target directory starts the backend server and serves the frontend dashboard
+- [x] Passing a custom directory path as a CLI argument targets that specific workspace
+- [x] The UI scans and lists all existing Test Specs from the workspace specs directory
+- [x] The UI scans and lists all existing Test Scripts from the workspace tests directory
+- [x] Tests verify that the CLI command launches the server and returns the discovered workspace files over the API
