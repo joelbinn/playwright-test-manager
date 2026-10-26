@@ -1073,7 +1073,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           const { value, done } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
+          const lines = buffer.split('\\n');
           buffer = lines.pop() || '';
 
           for (const line of lines) {
@@ -1178,7 +1178,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       if (!activeSpec) return;
       initDiffEditor();
 
-      let existingContent = '// No existing test script on disk for: ' + activeSpec.slug + '\n';
+      let existingContent = '// No existing test script on disk for: ' + activeSpec.slug + '\\n';
       try {
         const res = await fetch('/api/scripts/' + activeSpec.slug);
         if (res.ok) {
@@ -1198,7 +1198,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       statusEl.classList.remove('hidden');
 
       const origModel = monaco.editor.createModel(originalScriptCode, 'typescript');
-      const modModel = monaco.editor.createModel('// Generator agent assembling Playwright test script...\n', 'typescript');
+      const modModel = monaco.editor.createModel('// Generator agent assembling Playwright test script...\\n', 'typescript');
       diffEditorInstance.setModel({
         original: origModel,
         modified: modModel
@@ -1227,7 +1227,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           const { value, done } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
+          const lines = buffer.split('\\n');
           buffer = lines.pop() || '';
 
           for (const line of lines) {
@@ -1411,7 +1411,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           const { value, done } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
+          const lines = buffer.split('\\n');
           buffer = lines.pop() || '';
 
           for (const line of lines) {
