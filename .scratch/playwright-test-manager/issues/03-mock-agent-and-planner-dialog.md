@@ -4,12 +4,12 @@
 
 **Blocked by:** 02: Spec Split-Pane Editor & Markdown Preview with File Sync
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] A "Plan New Test" action button opens a dedicated planning modal in the UI
-- [ ] Users can enter a natural language prompt and optionally attach/paste PRD context
-- [ ] Submitting the prompt triggers the Planner agent using the built-in Mock Agent implementation
-- [ ] The generated Markdown stream renders live in the modal as tokens arrive
-- [ ] Users can accept the generated plan to automatically save it as a new Test Spec file in the workspace
-- [ ] Users can cancel an in-flight planning generation
-- [ ] Automated tests verify the Planner prompt-to-spec streaming flow and file creation
+- [x] A "Plan New Test" action button opens a dedicated planning modal in the UI
+- [x] Users can enter a natural language prompt and optionally attach/paste PRD context
+- [x] Submitting the prompt triggers the Planner agent using the built-in Mock Agent implementation
+- [x] The generated Markdown stream renders live in the modal as tokens arrive
+- [x] Users can accept the generated plan to automatically save it as a new Test Spec file in the workspace
+- [x] Users can cancel an in-flight planning generation
+- [x] Automated tests verify the Planner prompt-to-spec streaming flow and file creation

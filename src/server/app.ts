@@ -1,7 +1,9 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import { Readable } from 'node:stream';
 import { scanWorkspace } from './workspace.js';
 import { readSpec, writeSpec, createSpec } from './specs.js';
+import { planTestSpecStream } from './mock-agent.js';
 
 export interface ServerOptions {
   workspaceRoot: string;
@@ -53,6 +55,39 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     return updated;
   });
 
+  app.post('/api/planner/stream', async (req, reply) => {
+    const body = (req.body || {}) as { prompt?: string; prdContext?: string; chunkDelayMs?: number };
+    if (!body.prompt || !body.prompt.trim()) {
+      return reply.code(400).send({ error: 'Prompt is required' });
+    }
+
+    const abortController = new AbortController();
+    req.raw.on('close', () => {
+      abortController.abort();
+    });
+
+    const readable = Readable.from((async function* () {
+      try {
+        for await (const chunk of planTestSpecStream({
+          prompt: body.prompt!.trim(),
+          prdContext: body.prdContext?.trim(),
+          signal: abortController.signal,
+          chunkDelayMs: body.chunkDelayMs ?? 15
+        })) {
+          yield `data: ${JSON.stringify({ chunk })}\n\n`;
+        }
+        yield `data: ${JSON.stringify({ done: true })}\n\n`;
+      } catch (err: any) {
+        yield `data: ${JSON.stringify({ error: err.message })}\n\n`;
+      }
+    })());
+
+    reply.type('text/event-stream; charset=utf-8');
+    reply.header('Cache-Control', 'no-cache');
+    reply.header('Connection', 'keep-alive');
+    return reply.send(readable);
+  });
+
   app.get('/', async (req, reply) => {
     reply.type('text/html');
     return `<!DOCTYPE html>
@@ -88,10 +123,13 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 
       <div class="flex-1 overflow-y-auto p-4 space-y-6">
         <div>
+          <button id="btn-open-planner" class="w-full mb-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold py-2 px-3 rounded flex items-center justify-center gap-1.5 shadow transition">
+            <span>✨ Plan New Test</span>
+          </button>
           <div class="flex items-center justify-between mb-2">
             <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Test Specs</h2>
-            <button id="btn-new-spec" class="text-xs bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-0.5 rounded font-medium flex items-center gap-1">
-              + Ny Spec
+            <button id="btn-new-spec" class="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 px-2 py-0.5 rounded font-medium flex items-center gap-1">
+              + Ny
             </button>
           </div>
           <ul id="specs-list" class="space-y-1 text-sm text-slate-300">
@@ -161,6 +199,65 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         </div>
       </div>
     </main>
+  </div>
+
+  <!-- Planner Modal -->
+  <div id="planner-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+      <!-- Modal Header -->
+      <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
+        <div class="flex items-center gap-2">
+          <span class="text-lg">✨</span>
+          <h3 class="font-semibold text-slate-100 text-base">Plan New Test</h3>
+          <span class="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded font-mono">Mock Agent</span>
+        </div>
+        <button id="btn-close-planner" class="text-slate-400 hover:text-slate-200 text-xl leading-none p-1">&times;</button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="flex-1 overflow-y-auto p-6 space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+            Prompt / Vad vill du testa? <span class="text-emerald-400">*</span>
+          </label>
+          <textarea id="planner-prompt" rows="3" placeholder="T.ex: Användaren loggar in med giltiga kontouppgifter och navigerar till instrumentpanelen..." class="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500"></textarea>
+        </div>
+
+        <div>
+          <div class="flex items-center justify-between mb-1.5">
+            <label class="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+              PRD / Kravspecifikation (valfritt)
+            </label>
+            <span class="text-xs text-slate-500">Klistra in eller bifoga kontext</span>
+          </div>
+          <textarea id="planner-prd" rows="3" placeholder="Klistra in relevanta delar av din PRD, acceptanskriterier eller användarberättelse här..." class="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500"></textarea>
+        </div>
+
+        <!-- Live Streaming Preview Area -->
+        <div id="planner-output-container" class="border border-slate-800 rounded-lg bg-slate-950 overflow-hidden hidden flex flex-col">
+          <div class="px-4 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-xs">
+            <span id="planner-status" class="text-slate-300 flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>Planner genererar testspecifikation...</span>
+            </span>
+            <button id="btn-cancel-planner" class="text-rose-400 hover:text-rose-300 font-medium">
+              Avbryt generering
+            </button>
+          </div>
+          <div id="planner-preview" class="p-4 max-h-72 overflow-y-auto prose max-w-none text-slate-200 text-sm"></div>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="px-6 py-3 border-t border-slate-800 bg-slate-900/60 flex items-center justify-end gap-2">
+        <button id="btn-start-planning" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium px-4 py-2 rounded shadow transition">
+          Generera Test Spec
+        </button>
+        <button id="btn-accept-plan" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium px-4 py-2 rounded shadow transition hidden">
+          ✓ Acceptera & Spara som Test Spec
+        </button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -336,6 +433,150 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 
     window.selectSpec = selectSpec;
     loadWorkspace();
+
+    // Planner Dialog handling
+    let plannerAbortController = null;
+    let currentPlannedMarkdown = '';
+
+    function openPlannerModal() {
+      document.getElementById('planner-modal').classList.remove('hidden');
+      document.getElementById('planner-prompt').focus();
+    }
+
+    function closePlannerModal() {
+      if (plannerAbortController) {
+        plannerAbortController.abort();
+        plannerAbortController = null;
+      }
+      document.getElementById('planner-modal').classList.add('hidden');
+    }
+
+    async function startPlanning() {
+      const promptEl = document.getElementById('planner-prompt');
+      const prdEl = document.getElementById('planner-prd');
+      const prompt = promptEl.value.trim();
+      const prd = prdEl.value.trim();
+      if (!prompt) {
+        alert('Vänligen ange en prompt.');
+        return;
+      }
+
+      const outputContainer = document.getElementById('planner-output-container');
+      const preview = document.getElementById('planner-preview');
+      const status = document.getElementById('planner-status');
+      const cancelBtn = document.getElementById('btn-cancel-planner');
+      const startBtn = document.getElementById('btn-start-planning');
+      const acceptBtn = document.getElementById('btn-accept-plan');
+
+      outputContainer.classList.remove('hidden');
+      cancelBtn.classList.remove('hidden');
+      startBtn.classList.add('hidden');
+      acceptBtn.classList.add('hidden');
+      status.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>Planner genererar testspecifikation...</span>';
+      preview.innerHTML = '';
+      currentPlannedMarkdown = '';
+
+      plannerAbortController = new AbortController();
+
+      try {
+        const res = await fetch('/api/planner/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, prdContext: prd }),
+          signal: plannerAbortController.signal
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Generering misslyckades');
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const payload = JSON.parse(line.slice(6));
+              if (payload.chunk) {
+                currentPlannedMarkdown += payload.chunk;
+                const stripped = currentPlannedMarkdown.replace(/^---[\\s\\S]*?---\\n*/, '');
+                preview.innerHTML = marked.parse(stripped || currentPlannedMarkdown);
+                preview.scrollTop = preview.scrollHeight;
+              }
+              if (payload.done) {
+                status.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500"></span><span class="text-emerald-400 font-medium">Planering klar!</span>';
+                cancelBtn.classList.add('hidden');
+                acceptBtn.classList.remove('hidden');
+                startBtn.classList.remove('hidden');
+                startBtn.textContent = '🔄 Generera om';
+              }
+              if (payload.error) {
+                status.innerHTML = '<span class="text-rose-400">Fel: ' + payload.error + '</span>';
+                cancelBtn.classList.add('hidden');
+                startBtn.classList.remove('hidden');
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          status.innerHTML = '<span class="text-amber-400">Generering avbruten</span>';
+        } else {
+          status.innerHTML = '<span class="text-rose-400">Fel: ' + err.message + '</span>';
+        }
+        cancelBtn.classList.add('hidden');
+        startBtn.classList.remove('hidden');
+      } finally {
+        plannerAbortController = null;
+      }
+    }
+
+    async function acceptPlan() {
+      if (!currentPlannedMarkdown) return;
+      const prompt = document.getElementById('planner-prompt').value.trim();
+      const slug = prompt
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 30) || 'new-spec';
+
+      try {
+        const res = await fetch('/api/specs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            slug,
+            content: currentPlannedMarkdown
+          })
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Kunde inte spara spec');
+        }
+        closePlannerModal();
+        await loadWorkspace();
+        selectSpec(slug);
+      } catch (err) {
+        alert('Kunde inte spara Test Spec: ' + err.message);
+      }
+    }
+
+    document.getElementById('btn-open-planner').addEventListener('click', openPlannerModal);
+    document.getElementById('btn-close-planner').addEventListener('click', closePlannerModal);
+    document.getElementById('btn-start-planning').addEventListener('click', startPlanning);
+    document.getElementById('btn-cancel-planner').addEventListener('click', () => {
+      if (plannerAbortController) plannerAbortController.abort();
+    });
+    document.getElementById('btn-accept-plan').addEventListener('click', acceptPlan);
   </script>
 </body>
 </html>`;
