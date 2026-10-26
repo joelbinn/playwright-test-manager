@@ -107,6 +107,7 @@ const readline = require('readline');
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
 
 let promptId = null;
+let permissionsDone = false;
 
 rl.on('line', (line) => {
   if (!line.trim()) return;
@@ -142,6 +143,7 @@ rl.on('line', (line) => {
       params: { chunk: ',outside:' + msg.result.approved }
     }) + '\\n');
 
+    permissionsDone = true;
     if (promptId !== null) {
       process.stdout.write(JSON.stringify({
         jsonrpc: '2.0',
@@ -153,6 +155,13 @@ rl.on('line', (line) => {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's-1' } }) + '\\n');
   } else if (msg.method === 'session/prompt') {
     promptId = msg.id;
+    if (permissionsDone) {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: promptId,
+        result: { status: 'completed' }
+      }) + '\\n');
+    }
   } else if (msg.method === 'session/close') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { closed: true } }) + '\\n');
     process.exit(0);

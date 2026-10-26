@@ -485,9 +485,9 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Playwright Test Manager</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs/loader.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     .prose h1 { font-size: 1.5rem; font-weight: bold; margin-bottom: 0.75rem; color: #f8fafc; }
     .prose h2 { font-size: 1.25rem; font-weight: 600; margin-top: 1rem; margin-bottom: 0.5rem; color: #f1f5f9; }
@@ -822,6 +822,16 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
   </div>
 
   <script>
+    function renderMarkdown(md) {
+      if (typeof marked !== 'undefined') {
+        return marked.parse(md || '');
+      }
+      if (typeof window !== 'undefined' && window.marked) {
+        return window.marked.parse(md || '');
+      }
+      return md || '';
+    }
+
     let activeSpec = null;
     let editorInstance = null;
     let monacoLoaded = false;
@@ -866,7 +876,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       // Remove frontmatter before parsing markdown preview
       const markdownOnly = content.replace(/^---[\\s\\S]*?---\\n*/, '');
       const previewEl = document.getElementById('markdown-preview');
-      previewEl.innerHTML = marked.parse(markdownOnly);
+      previewEl.innerHTML = renderMarkdown(markdownOnly);
     }
 
     async function loadWorkspace() {
@@ -1088,7 +1098,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
               if (payload.chunk) {
                 currentPlannedMarkdown += payload.chunk;
                 const stripped = currentPlannedMarkdown.replace(/^---[\\s\\S]*?---\\n*/, '');
-                preview.innerHTML = marked.parse(stripped || currentPlannedMarkdown);
+                preview.innerHTML = renderMarkdown(stripped || currentPlannedMarkdown);
                 preview.scrollTop = preview.scrollHeight;
               }
               if (payload.done) {
