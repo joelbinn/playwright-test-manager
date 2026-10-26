@@ -1,0 +1,13 @@
+{
+  "baseUrl": "http://localhost:3000",
+  "seedTestPath": "tests/seed.spec.ts",
+  "agentType": "acp",
+  "acpCommand": "npx",
+  "acpArgs": [
+    "-y",
+    "agy-acp",
+    "start",
+    "--mode",
+    "stdio"
+  ]
+}

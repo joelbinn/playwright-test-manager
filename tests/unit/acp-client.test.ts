@@ -42,7 +42,7 @@ rl.on('line', (line) => {
     }) + '\\n');
   } else if (msg.method === 'notifications/initialized') {
     // Handshake complete
-  } else if (msg.method === 'session/create') {
+  } else if (msg.method === 'session/create' || msg.method === 'session/new') {
     process.stdout.write(JSON.stringify({
       jsonrpc: '2.0',
       id: msg.id,
@@ -149,7 +149,7 @@ rl.on('line', (line) => {
         result: { status: 'completed' }
       }) + '\\n');
     }
-  } else if (msg.method === 'session/create') {
+  } else if (msg.method === 'session/create' || msg.method === 'session/new') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's-1' } }) + '\\n');
   } else if (msg.method === 'session/prompt') {
     promptId = msg.id;
@@ -192,7 +192,7 @@ rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.method === 'initialize') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
-  } else if (msg.method === 'session/create') {
+  } else if (msg.method === 'session/create' || msg.method === 'session/new') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's-hang' } }) + '\\n');
   } else if (msg.method === 'session/prompt') {
     // send one chunk then hang

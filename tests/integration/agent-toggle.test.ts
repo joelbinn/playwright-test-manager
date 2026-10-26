@@ -51,7 +51,7 @@ rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.method === 'initialize') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
-  } else if (msg.method === 'session/create') {
+  } else if (msg.method === 'session/create' || msg.method === 'session/new') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's-acp' } }) + '\\n');
   } else if (msg.method === 'session/prompt') {
     process.stdout.write(JSON.stringify({
@@ -107,8 +107,8 @@ rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.method === 'initialize') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
-  } else if (msg.method === 'session/create') {
-    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's-' + msg.params.role } }) + '\\n');
+  } else if (msg.method === 'session/create' || msg.method === 'session/new') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's-' + (msg.params?.role || 'default') } }) + '\\n');
   } else if (msg.method === 'session/prompt') {
     process.stdout.write(JSON.stringify({
       jsonrpc: '2.0',

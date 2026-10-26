@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from 'node:child_process';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import * as readline from 'node:readline';
 
 export function isPathWithinWorkspace(workspaceRoot: string, targetPath: string): boolean {
@@ -25,6 +26,28 @@ export interface StreamTaskParams {
   prompt: string;
   context?: Record<string, any>;
   signal?: AbortSignal;
+}
+
+function extractChunkText(params: any): string | undefined {
+  if (!params) return undefined;
+  if (typeof params.chunk === 'string') return params.chunk;
+  if (typeof params.text === 'string') return params.text;
+  if (params.update) {
+    if (typeof params.update.text === 'string') return params.update.text;
+    if (typeof params.update.delta === 'string') return params.update.delta;
+    if (typeof params.update.chunk === 'string') return params.update.chunk;
+    if (params.update.type === 'agent_message_chunk' && typeof params.update.text === 'string') {
+      return params.update.text;
+    }
+    if (params.update.content) {
+      if (typeof params.update.content.text === 'string') return params.update.content.text;
+      if (typeof params.update.content === 'string') return params.update.content;
+      if (Array.isArray(params.update.content)) {
+        return params.update.content.map((c: any) => c.text || '').join('');
+      }
+    }
+  }
+  return undefined;
 }
 
 export class AcpClient {
@@ -128,7 +151,7 @@ export class AcpClient {
       terminal: false
     });
 
-    rl.on('line', (line) => {
+    rl.on('line', async (line) => {
       if (!line.trim()) return;
       try {
         const msg = JSON.parse(line);
@@ -145,20 +168,88 @@ export class AcpClient {
           return;
         }
 
-        // Handle agent-initiated requests (e.g. permissions)
+        // Handle agent-initiated requests (e.g. permissions or fs operations)
         if (typeof msg.id === 'number' && msg.method) {
-          if (msg.method === 'permission/request' || msg.method === 'permissions/request') {
-            const reqPath = msg.params?.path;
+          if (
+            msg.method === 'permission/request' ||
+            msg.method === 'permissions/request' ||
+            msg.method === 'session/request_permission'
+          ) {
+            const reqPath =
+              msg.params?.path ||
+              msg.params?.request?.path ||
+              msg.params?.input?.path ||
+              msg.params?.toolCall?.input?.path;
             const approved = isPathWithinWorkspace(this.workspaceRoot, reqPath);
             this.send({
               jsonrpc: '2.0',
               id: msg.id,
-              result: { approved, granted: approved }
+              result: {
+                approved,
+                granted: approved,
+                response: { decision: approved ? 'allow' : 'deny' }
+              }
             });
             return;
           }
 
-          // Unknown agent request: default to error or empty
+          if (msg.method === 'fs/readTextFile') {
+            const filePath = msg.params?.path;
+            if (!isPathWithinWorkspace(this.workspaceRoot, filePath)) {
+              this.send({
+                jsonrpc: '2.0',
+                id: msg.id,
+                error: { code: -32000, message: 'Access denied: path outside workspace' }
+              });
+              return;
+            }
+            try {
+              const content = await fs.readFile(path.resolve(this.workspaceRoot, filePath), 'utf-8');
+              this.send({
+                jsonrpc: '2.0',
+                id: msg.id,
+                result: { content }
+              });
+            } catch (err: any) {
+              this.send({
+                jsonrpc: '2.0',
+                id: msg.id,
+                error: { code: -32000, message: err.message }
+              });
+            }
+            return;
+          }
+
+          if (msg.method === 'fs/writeTextFile') {
+            const filePath = msg.params?.path;
+            if (!isPathWithinWorkspace(this.workspaceRoot, filePath)) {
+              this.send({
+                jsonrpc: '2.0',
+                id: msg.id,
+                error: { code: -32000, message: 'Access denied: path outside workspace' }
+              });
+              return;
+            }
+            try {
+              const fullPath = path.resolve(this.workspaceRoot, filePath);
+              await fs.mkdir(path.dirname(fullPath), { recursive: true });
+              await fs.writeFile(fullPath, msg.params?.content || '', 'utf-8');
+              this.send({
+                jsonrpc: '2.0',
+                id: msg.id,
+                result: { success: true }
+              });
+            } catch (err: any) {
+              this.send({
+                jsonrpc: '2.0',
+                id: msg.id,
+                error: { code: -32000, message: err.message }
+              });
+            }
+            return;
+          }
+
+          // Unknown agent request: default to method not found
           this.send({
             jsonrpc: '2.0',
             id: msg.id,
@@ -169,8 +260,8 @@ export class AcpClient {
 
         // Handle agent notifications (e.g. streaming update)
         if (msg.method === 'session/update' || msg.method === 'notifications/update') {
-          const chunk = msg.params?.chunk;
-          if (typeof chunk === 'string') {
+          const chunk = extractChunkText(msg.params);
+          if (chunk) {
             pushChunk(chunk);
           }
         }
@@ -198,25 +289,50 @@ export class AcpClient {
     let sessionId: string | undefined;
 
     try {
-      // 1. Handshake
+      // 1. Handshake according to ACP specification
       await this.request('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: {
+            readTextFile: true,
+            writeTextFile: true
+          },
+          terminal: true
+        },
         clientInfo: { name: 'playwright-test-manager', version: '0.1.0' },
         workspaceRoot: this.workspaceRoot
       });
       this.notify('notifications/initialized');
 
-      // 2. Ephemeral session create
-      const sessionResult = await this.request('session/create', {
-        role: params.role,
-        workspaceRoot: this.workspaceRoot
-      });
-      sessionId = sessionResult?.sessionId || 'ephemeral-session';
+      // 2. Ephemeral session create (standard ACP is session/new, with fallback to session/create)
+      try {
+        const sessionResult = await this.request('session/new', {
+          cwd: this.workspaceRoot,
+          mcpServers: []
+        });
+        sessionId = sessionResult?.sessionId;
+      } catch {
+        const sessionResult = await this.request('session/create', {
+          role: params.role,
+          cwd: this.workspaceRoot,
+          workspaceRoot: this.workspaceRoot
+        });
+        sessionId = sessionResult?.sessionId;
+      }
+      sessionId = sessionId || 'ephemeral-session';
 
-      // 3. Issue prompt
+      // 3. Issue prompt (standard ACP requires prompt: [{ type: 'text', text: ... }])
+      const promptBlocks = [
+        {
+          type: 'text',
+          text: params.prompt
+        }
+      ];
+
       const promptPromise = this.request('session/prompt', {
         sessionId,
+        prompt: promptBlocks,
         role: params.role,
-        prompt: params.prompt,
         context: params.context
       });
 
