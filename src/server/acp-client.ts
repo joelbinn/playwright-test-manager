@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import * as readline from 'node:readline';
+import { createDomainLogger } from './logger.js';
 
 export function isPathWithinWorkspace(workspaceRoot: string, targetPath: string): boolean {
   if (!targetPath) return false;
@@ -19,6 +20,7 @@ export interface AcpClientOptions {
   command: string;
   args?: string[];
   workspaceRoot: string;
+  logger?: any;
 }
 
 export interface StreamTaskParams {
@@ -26,6 +28,17 @@ export interface StreamTaskParams {
   prompt: string;
   context?: Record<string, any>;
   signal?: AbortSignal;
+}
+
+export interface AcpProbeResult {
+  ok: boolean;
+  agent?: {
+    name?: string;
+    version?: string;
+  };
+  model?: string;
+  error?: string;
+  details?: string;
 }
 
 function extractChunkText(params: any): string | undefined {
@@ -57,11 +70,13 @@ export class AcpClient {
   private process: ChildProcess | null = null;
   private nextRequestId = 1;
   private pendingRequests = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void }>();
+  private logger: any;
 
   constructor(options: AcpClientOptions) {
     this.command = options.command;
     this.args = options.args || [];
     this.workspaceRoot = options.workspaceRoot;
+    this.logger = createDomainLogger('acp', options.logger);
   }
 
   public isAlive(): boolean {
@@ -114,6 +129,180 @@ export class AcpClient {
       req.reject(new Error('ACP client process closed'));
     }
     this.pendingRequests.clear();
+  }
+
+  private resolveModel(initResult: any): string | undefined {
+    if (initResult) {
+      if (typeof initResult.model === 'string' && initResult.model.trim()) {
+        return initResult.model.trim();
+      }
+      if (Array.isArray(initResult.models) && initResult.models.length > 0) {
+        return String(initResult.models[0]).trim();
+      }
+      if (initResult.agentInfo && typeof initResult.agentInfo.model === 'string') {
+        return initResult.agentInfo.model.trim();
+      }
+      if (initResult.serverInfo && typeof initResult.serverInfo.model === 'string') {
+        return initResult.serverInfo.model.trim();
+      }
+      if (initResult.capabilities?.model && typeof initResult.capabilities.model === 'string') {
+        return initResult.capabilities.model.trim();
+      }
+    }
+    // Fallback: parse --model argument from args
+    for (let i = 0; i < this.args.length; i++) {
+      const arg = this.args[i];
+      if (arg === '--model' && i + 1 < this.args.length) {
+        const val = this.args[i + 1].trim().replace(/^['"]|['"]$/g, '');
+        if (val && !val.startsWith('-')) return val;
+      }
+      if (arg.startsWith('--model=')) {
+        const val = arg.slice('--model='.length).trim().replace(/^['"]|['"]$/g, '');
+        if (val) return val;
+      }
+    }
+    return undefined;
+  }
+
+  public async probe(options?: { timeoutMs?: number }): Promise<AcpProbeResult> {
+    const timeoutMs = options?.timeoutMs ?? 8000;
+    let timer: NodeJS.Timeout | null = null;
+    let stderrOutput = '';
+
+    try {
+      if (!this.command) {
+        return {
+          ok: false,
+          error: 'No ACP command specified'
+        };
+      }
+
+      this.logger.info({ command: this.command, args: this.args, cwd: this.workspaceRoot }, 'Spawning ACP agent process for probe');
+
+      const child = spawn(this.command, this.args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: this.workspaceRoot
+      });
+      this.process = child;
+
+      child.stderr?.on('data', (data) => {
+        stderrOutput += data.toString();
+      });
+
+      const rl = readline.createInterface({
+        input: child.stdout!,
+        terminal: false
+      });
+
+      rl.on('line', (line) => {
+        if (!line.trim()) return;
+        try {
+          const msg = JSON.parse(line);
+          if (typeof msg.id === 'number' && this.pendingRequests.has(msg.id)) {
+            const { resolve, reject } = this.pendingRequests.get(msg.id)!;
+            this.pendingRequests.delete(msg.id);
+            if (msg.error) {
+              reject(new Error(msg.error.message || 'JSON-RPC Error'));
+            } else {
+              resolve(msg.result);
+            }
+          }
+        } catch {}
+      });
+
+      child.on('error', (err) => {
+        this.logger.error({ error: err.message }, 'ACP subprocess error');
+        for (const [, req] of this.pendingRequests) {
+          req.reject(err);
+        }
+        this.pendingRequests.clear();
+      });
+
+      child.on('exit', (code) => {
+        this.logger.info({ code }, `ACP agent process exited with code ${code}`);
+        const errorMsg = stderrOutput.trim()
+          ? `Agent process exited with code ${code}: ${stderrOutput.trim()}`
+          : `Agent process exited unexpectedly with code ${code}`;
+        for (const [, req] of this.pendingRequests) {
+          req.reject(new Error(errorMsg));
+        }
+        this.pendingRequests.clear();
+      });
+
+      const probePromise = (async () => {
+        // 1. Handshake
+        const initResult = await this.request('initialize', {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+            terminal: true
+          },
+          clientInfo: { name: 'playwright-test-manager', version: '0.1.0' },
+          workspaceRoot: this.workspaceRoot
+        });
+        this.notify('notifications/initialized');
+        this.logger.info({ agent: initResult?.agentInfo || initResult?.serverInfo }, 'ACP handshake initialize successful');
+
+        // 2. Ephemeral session create
+        let sessionId: string | undefined;
+        try {
+          const sessionResult = await this.request('session/new', {
+            cwd: this.workspaceRoot,
+            mcpServers: []
+          });
+          sessionId = sessionResult?.sessionId;
+        } catch {
+          const sessionResult = await this.request('session/create', {
+            role: 'planner',
+            cwd: this.workspaceRoot,
+            workspaceRoot: this.workspaceRoot
+          });
+          sessionId = sessionResult?.sessionId;
+        }
+        if (sessionId) {
+          this.logger.info({ sessionId }, 'ACP session created');
+        }
+
+        // 3. Ephemeral session close
+        if (sessionId) {
+          try {
+            await this.request('session/close', { sessionId });
+            this.logger.info({ sessionId }, 'ACP session closed');
+          } catch {}
+        }
+
+        // 4. Resolve agent info and model
+        const agentInfo = initResult?.agentInfo || initResult?.serverInfo || initResult?.agent;
+        const name = agentInfo?.name;
+        const version = agentInfo?.version;
+        const model = this.resolveModel(initResult);
+
+        return {
+          ok: true,
+          agent: name ? { name, version } : undefined,
+          model
+        };
+      })();
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Connection test timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      });
+
+      const result = await Promise.race([probePromise, timeoutPromise]);
+      return result;
+    } catch (err: any) {
+      const details = stderrOutput.trim() || undefined;
+      return {
+        ok: false,
+        error: err?.message || 'ACP connection probe failed',
+        details
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.closeProcess();
+    }
   }
 
   public async *streamTask(params: StreamTaskParams): AsyncGenerator<string> {

@@ -2,12 +2,14 @@ import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { createDomainLogger } from './logger.js';
 
 export interface RunPlaywrightOptions {
   workspaceRoot: string;
   scriptSlug?: string;
   headed?: boolean;
   command?: string;
+  logger?: any;
   onLog?: (chunk: string, stream: 'stdout' | 'stderr') => void;
   onStatus?: (status: 'running' | 'passed' | 'failed') => void;
 }
@@ -65,10 +67,12 @@ function extractErrorAndStack(logs: string[]): { error?: string; stack?: string 
 }
 
 export async function runPlaywright(options: RunPlaywrightOptions): Promise<RunResult> {
+  const logger = createDomainLogger('runner', options.logger);
   const runId = randomUUID();
   const startTime = Date.now();
 
   options.onStatus?.('running');
+  logger.info({ runId, status: 'running' }, 'Test run started');
 
   const args: string[] = [];
 
@@ -98,6 +102,18 @@ export async function runPlaywright(options: RunPlaywrightOptions): Promise<RunR
     cmd = 'npx';
     cmdArgs = ['playwright', 'test', ...args];
   }
+
+  logger.info(
+    {
+      runId,
+      command: cmd,
+      args: cmdArgs,
+      cwd: options.workspaceRoot,
+      headed: Boolean(options.headed),
+      scriptSlug: options.scriptSlug
+    },
+    `Dispatched test run: ${cmd} ${cmdArgs.join(' ')}`
+  );
 
   const stderrChunks: string[] = [];
   const stdoutChunks: string[] = [];
@@ -135,6 +151,15 @@ export async function runPlaywright(options: RunPlaywrightOptions): Promise<RunR
         error = extracted.error;
         stack = extracted.stack;
         tracePath = await findLatestTrace(options.workspaceRoot);
+        logger.warn(
+          { runId, status, exitCode: code, durationMs, error, tracePath },
+          `Test run failed with exit code ${code} (${durationMs}ms)`
+        );
+      } else {
+        logger.info(
+          { runId, status, exitCode: code, durationMs },
+          `Test run completed successfully (${durationMs}ms)`
+        );
       }
 
       resolve({
@@ -152,6 +177,11 @@ export async function runPlaywright(options: RunPlaywrightOptions): Promise<RunR
       options.onLog?.(err.message, 'stderr');
       const durationMs = Date.now() - startTime;
       options.onStatus?.('failed');
+
+      logger.error(
+        { runId, error: err.message, stack: err.stack, durationMs },
+        `Failed to spawn test runner process: ${err.message}`
+      );
 
       const tracePath = await findLatestTrace(options.workspaceRoot);
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs/promises';
+import { Writable } from 'node:stream';
 import { runPlaywright } from '../../src/server/runner.js';
 
 describe('Playwright Test Runner Engine (Seam: Runner Process)', () => {
@@ -150,6 +151,51 @@ process.exit(1);`
     expect(result.stack).toContain('at checkout.spec.ts:18:24');
     expect(result.tracePath).toBeDefined();
     expect(result.tracePath).toContain('trace.zip');
+
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('logs test run dispatch, status transitions, and completion with component tag without echoing raw stdout', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ptm-runner-log-test-'));
+    const logEntries: any[] = [];
+    const stream = new Writable({
+      write(chunk, _encoding, cb) {
+        logEntries.push(JSON.parse(chunk.toString()));
+        cb();
+      }
+    });
+
+    const fakeScript = path.join(tempDir, 'fake-runner.js');
+    await fs.writeFile(
+      fakeScript,
+      `console.log("Raw stdout line 1");
+console.log("Raw stdout line 2");
+process.exit(0);`
+    );
+
+    await runPlaywright({
+      workspaceRoot: tempDir,
+      scriptSlug: 'auth',
+      headed: true,
+      command: `node ${fakeScript}`,
+      logger: { stream, level: 'info' }
+    });
+
+    const dispatchLog = logEntries.find((l) => l.command && l.component === 'runner');
+    expect(dispatchLog).toBeDefined();
+    expect(dispatchLog.headed).toBe(true);
+    expect(dispatchLog.cwd).toBe(tempDir);
+
+    const completionLog = logEntries.find((l) => l.exitCode === 0 && l.component === 'runner');
+    expect(completionLog).toBeDefined();
+    expect(completionLog.status).toBe('passed');
+    expect(typeof completionLog.durationMs).toBe('number');
+
+    // Ensure raw stdout lines were NOT individually logged by runner logger
+    const rawStdoutLogs = logEntries.filter((l) =>
+      typeof l.msg === 'string' && (l.msg.includes('Raw stdout line 1') || l.msg.includes('Raw stdout line 2'))
+    );
+    expect(rawStdoutLogs).toHaveLength(0);
 
     await fs.rm(tempDir, { recursive: true, force: true });
   });

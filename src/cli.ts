@@ -2,6 +2,7 @@
 import * as path from 'node:path';
 import { exec } from 'node:child_process';
 import { createServer } from './server/app.js';
+import { resolveLogLevel } from './server/logger.js';
 
 export async function runCli(argv: string[] = process.argv.slice(2)) {
   let workspaceRoot = process.cwd();
@@ -22,7 +23,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)) {
     }
   }
 
-  const app = await createServer({ workspaceRoot });
+  const logLevel = resolveLogLevel({ argv, env: process.env });
+  const app = await createServer({ workspaceRoot, logLevel });
 
   await app.listen({ port, host });
   const serverUrl = `http://${host}:${port}`;

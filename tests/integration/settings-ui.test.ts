@@ -48,6 +48,11 @@ describe('Project Settings UI Contract (Seam: Web UI Contract & Settings Modal)'
     expect(html).toContain('id="settings-acp-command"');
     expect(html).toContain('id="settings-acp-args"');
 
+    // Test connection button and diagnostics container
+    expect(html).toContain('id="btn-test-acp"');
+    expect(html).toContain('id="acp-test-result"');
+    expect(html).toContain('Test Connection');
+
     // Settings save button
     expect(html).toContain('id="settings-save-btn"');
 

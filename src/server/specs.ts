@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import matter from 'gray-matter';
+import { createDomainLogger } from './logger.js';
 
 export interface SpecDetails {
   slug: string;
@@ -22,17 +23,30 @@ function resolveSpecPath(workspaceRoot: string, slug: string): string {
   return targetPath;
 }
 
-export async function readSpec(workspaceRoot: string, slug: string): Promise<SpecDetails | null> {
+export async function readSpec(workspaceRoot: string, slug: string, logger?: any): Promise<SpecDetails | null> {
+  const log = createDomainLogger('workspace', logger);
   const filePath = resolveSpecPath(workspaceRoot, slug);
   try {
     const raw = await fs.readFile(filePath, 'utf-8');
-    const parsed = matter(raw);
+    let frontmatter: Record<string, any> = {};
+    let markdown = raw;
+    try {
+      const parsed = matter(raw);
+      frontmatter = parsed.data;
+      markdown = parsed.content;
+    } catch (err: any) {
+      log.warn(
+        { slug, error: err.message },
+        `Frontmatter parsing warning in spec "${slug}": ${err.message}`
+      );
+    }
+    log.info({ slug, path: filePath }, `Read spec "${slug}"`);
     return {
       slug: path.basename(filePath, '.md'),
       name: path.basename(filePath),
       content: raw,
-      frontmatter: parsed.data,
-      markdown: parsed.content
+      frontmatter,
+      markdown
     };
   } catch (err: any) {
     if (err.code === 'ENOENT') return null;
@@ -40,24 +54,39 @@ export async function readSpec(workspaceRoot: string, slug: string): Promise<Spe
   }
 }
 
-export async function writeSpec(workspaceRoot: string, slug: string, rawContent: string): Promise<SpecDetails> {
+export async function writeSpec(workspaceRoot: string, slug: string, rawContent: string, logger?: any): Promise<SpecDetails> {
+  const log = createDomainLogger('workspace', logger);
   const filePath = resolveSpecPath(workspaceRoot, slug);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, rawContent, 'utf-8');
 
-  const parsed = matter(rawContent);
+  let frontmatter: Record<string, any> = {};
+  let markdown = rawContent;
+  try {
+    const parsed = matter(rawContent);
+    frontmatter = parsed.data;
+    markdown = parsed.content;
+  } catch (err: any) {
+    log.warn(
+      { slug, error: err.message },
+      `Frontmatter parsing warning when writing spec "${slug}": ${err.message}`
+    );
+  }
+
+  log.info({ slug, path: filePath, bytes: rawContent.length }, `Wrote spec "${slug}"`);
   return {
     slug: path.basename(filePath, '.md'),
     name: path.basename(filePath),
     content: rawContent,
-    frontmatter: parsed.data,
-    markdown: parsed.content
+    frontmatter,
+    markdown
   };
 }
 
 export async function createSpec(
   workspaceRoot: string,
-  input: { slug: string; title?: string; markdown?: string; content?: string }
+  input: { slug: string; title?: string; markdown?: string; content?: string },
+  logger?: any
 ): Promise<SpecDetails> {
   const filePath = resolveSpecPath(workspaceRoot, input.slug);
 
@@ -76,5 +105,5 @@ export async function createSpec(
     fullContent = `${frontmatterLines}${input.markdown || ''}`;
   }
 
-  return await writeSpec(workspaceRoot, input.slug, fullContent);
+  return await writeSpec(workspaceRoot, input.slug, fullContent, logger);
 }

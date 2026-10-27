@@ -1,4 +1,4 @@
-import Fastify, { FastifyInstance } from 'fastify';
+import Fastify, { FastifyInstance, LogController } from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { Readable } from 'node:stream';
@@ -10,16 +10,69 @@ import { readSpec, writeSpec, createSpec } from './specs.js';
 import { readScript, writeScript } from './scripts.js';
 import { planTestSpecStream, generateTestScriptStream, healTestScriptStream } from './mock-agent.js';
 import { runPlaywright } from './runner.js';
-import { getSettings, saveSettings } from './settings.js';
+import { getSettings, saveSettings, parseCommandLineArgs, sanitizeArg } from './settings.js';
 import { AcpClient } from './acp-client.js';
+import { getFastifyLoggerConfig, shouldSuppressLog, createDomainLogger } from './logger.js';
 
 export interface ServerOptions {
   workspaceRoot: string;
+  logLevel?: string;
+  logger?: any;
 }
 
 export async function createServer(options: ServerOptions): Promise<FastifyInstance> {
+  const loggerConfig = getFastifyLoggerConfig({
+    level: options.logLevel,
+    logger: options.logger
+  });
+
   const app = Fastify({
-    logger: false
+    logger: loggerConfig,
+    logController: new LogController({ disableRequestLogging: true })
+  });
+
+  app.addHook('onResponse', async (req, reply) => {
+    if (shouldSuppressLog(req.url)) {
+      return;
+    }
+    const responseTime = Math.round(reply.elapsedTime);
+    req.log.info({
+      reqId: req.id,
+      method: req.method,
+      url: req.url,
+      statusCode: reply.statusCode,
+      responseTime
+    }, `${req.method} ${req.url} ${reply.statusCode} - ${responseTime}ms`);
+  });
+
+  app.setErrorHandler((error: any, request, reply) => {
+    const statusCode = error?.statusCode || 500;
+    const errorMessage = error?.message || 'Internal Server Error';
+    const errorStack = error?.stack;
+
+    if (statusCode >= 500) {
+      request.log.error(
+        {
+          reqId: request.id,
+          statusCode,
+          error: errorMessage,
+          stack: errorStack
+        },
+        `Unhandled error on ${request.method} ${request.url}: ${errorMessage}`
+      );
+    } else {
+      request.log.warn(
+        {
+          reqId: request.id,
+          statusCode,
+          error: errorMessage
+        },
+        `Client error on ${request.method} ${request.url}: ${errorMessage}`
+      );
+    }
+    reply.status(statusCode).send({
+      error: errorMessage
+    });
   });
 
   await app.register(cors, { origin: true });
@@ -71,10 +124,14 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     return undefined;
   }
 
-  app.get('/ws/runs', { websocket: true }, (socket) => {
+  const wsLogger = createDomainLogger('websocket', app.log);
+
+  app.get('/ws/runs', { websocket: true }, (socket, req) => {
     activeSockets.add(socket);
+    wsLogger.info({ activeConnections: activeSockets.size, ip: req.ip }, `WebSocket client connected (active: ${activeSockets.size})`);
     socket.on('close', () => {
       activeSockets.delete(socket);
+      wsLogger.info({ activeConnections: activeSockets.size }, `WebSocket client disconnected (active: ${activeSockets.size})`);
     });
   });
 
@@ -86,6 +143,35 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     const body = (req.body || {}) as any;
     const updated = await saveSettings(options.workspaceRoot, body);
     return updated;
+  });
+
+  app.post('/api/settings/test-acp', async (req) => {
+    const body = (req.body || {}) as any;
+    let command = body.acpCommand;
+    let args = body.acpArgs;
+
+    if (command === undefined) {
+      const current = await getSettings(options.workspaceRoot);
+      command = current.acpCommand;
+      args = current.acpArgs;
+    }
+
+    if (!Array.isArray(args)) {
+      if (typeof args === 'string') {
+        args = parseCommandLineArgs(args);
+      } else {
+        args = [];
+      }
+    }
+    const cleanArgs = args.map(sanitizeArg);
+
+    const client = new AcpClient({
+      command: command || '',
+      args: cleanArgs,
+      workspaceRoot: options.workspaceRoot
+    });
+
+    return await client.probe({ timeoutMs: 8000 });
   });
 
   app.get('/api/runs/status', async () => {
@@ -139,6 +225,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       scriptSlug: body.slug,
       headed: body.headed,
       command: body.command,
+      logger: app.log,
       onLog: (chunk, stream) => {
         broadcast({
           type: 'log',
@@ -202,13 +289,13 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     };
   });
 
-  app.get('/api/workspace', async () => {
-    return await scanWorkspace(options.workspaceRoot);
+  app.get('/api/workspace', async (req) => {
+    return await scanWorkspace(options.workspaceRoot, req.log);
   });
 
   app.get('/api/specs/:slug', async (req, reply) => {
     const { slug } = req.params as { slug: string };
-    const spec = await readSpec(options.workspaceRoot, slug);
+    const spec = await readSpec(options.workspaceRoot, slug, req.log);
     if (!spec) {
       return reply.code(404).send({ error: 'Spec not found' });
     }
@@ -221,7 +308,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       return reply.code(400).send({ error: 'Slug is required' });
     }
     try {
-      const created = await createSpec(options.workspaceRoot, body);
+      const created = await createSpec(options.workspaceRoot, body, req.log);
       return reply.code(201).send(created);
     } catch (err: any) {
       if (err.code === 'EEXIST') {
@@ -237,7 +324,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     if (!body?.content) {
       return reply.code(400).send({ error: 'Content is required' });
     }
-    const updated = await writeSpec(options.workspaceRoot, slug, body.content);
+    const updated = await writeSpec(options.workspaceRoot, slug, body.content, req.log);
     return updated;
   });
 
@@ -804,6 +891,14 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
             </label>
             <input id="settings-acp-args" type="text" placeholder="e.g. --acp" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono">
           </div>
+
+          <div class="pt-1">
+            <button id="btn-test-acp" type="button" class="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-medium px-3 py-1.5 rounded transition flex items-center gap-1.5">
+              <span>🔌 Test Connection</span>
+            </button>
+          </div>
+
+          <div id="acp-test-result" class="hidden text-xs rounded-lg p-3"></div>
         </div>
 
         <div id="settings-status" class="text-xs font-medium text-emerald-400"></div>
@@ -1626,8 +1721,70 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       }
     }
 
+    async function testAcpConnection() {
+      const btnTestAcp = document.getElementById('btn-test-acp');
+      const acpTestResult = document.getElementById('acp-test-result');
+      const acpCommand = document.getElementById('settings-acp-command')?.value.trim();
+      const acpArgsRaw = document.getElementById('settings-acp-args')?.value.trim() || '';
+      const acpArgs = acpArgsRaw ? (acpArgsRaw.match(/[^\\s"']+|"([^"]*)"|'([^']*)'/g) || []).map(s => s.replace(/^['"]|['"]$/g, '')) : [];
+
+      if (btnTestAcp) {
+        btnTestAcp.disabled = true;
+        btnTestAcp.innerHTML = '<span class="inline-block animate-spin">⏳</span> Probing ACP Agent...';
+      }
+      if (acpTestResult) {
+        acpTestResult.classList.remove('hidden');
+        acpTestResult.className = 'text-xs rounded-lg p-3 bg-slate-800/60 border border-slate-700 text-slate-300 flex items-center gap-2';
+        acpTestResult.innerHTML = '<span class="inline-block animate-spin">🔄</span> Probing ACP handshake and session...';
+      }
+
+      try {
+        const res = await fetch('/api/settings/test-acp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ acpCommand, acpArgs })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          const agentName = data.agent?.name || 'ACP Agent';
+          const agentVersion = data.agent?.version ? ' v' + data.agent.version : '';
+          const modelHtml = data.model
+            ? '<div class="mt-1 text-slate-300"><span class="text-emerald-400 font-semibold">Active Model:</span> <code class="bg-slate-900 px-1 py-0.5 rounded text-emerald-300 font-mono">' + data.model + '</code></div>'
+            : '';
+          if (acpTestResult) {
+            acpTestResult.className = 'text-xs rounded-lg p-3 bg-emerald-950/40 border border-emerald-500/30 text-emerald-200';
+            acpTestResult.innerHTML = '<div class="flex items-center gap-2 font-medium"><span class="text-base text-emerald-400">✓</span><span>Connected to <strong>' + agentName + agentVersion + '</strong></span></div>' + modelHtml;
+          }
+        } else {
+          const errorMsg = data.error || 'Connection probe failed';
+          const detailsHtml = data.details
+            ? '<pre class="mt-2 p-2 bg-slate-900 border border-red-500/20 text-red-300 text-[11px] font-mono rounded overflow-x-auto whitespace-pre-wrap">' + data.details + '</pre>'
+            : '';
+          if (acpTestResult) {
+            acpTestResult.className = 'text-xs rounded-lg p-3 bg-red-950/40 border border-red-500/30 text-red-200';
+            acpTestResult.innerHTML = '<div class="flex items-center gap-2 font-medium"><span class="text-base text-red-400">⚠️</span><span>' + errorMsg + '</span></div>' + detailsHtml;
+          }
+        }
+      } catch (err) {
+        if (acpTestResult) {
+          acpTestResult.className = 'text-xs rounded-lg p-3 bg-red-950/40 border border-red-500/30 text-red-200';
+          acpTestResult.innerHTML = '<div class="flex items-center gap-2 font-medium"><span class="text-base text-red-400">⚠️</span><span>Failed to send probe request: ' + (err.message || String(err)) + '</span></div>';
+        }
+      } finally {
+        if (btnTestAcp) {
+          btnTestAcp.disabled = false;
+          btnTestAcp.innerHTML = '<span>🔌 Test Connection</span>';
+        }
+      }
+    }
+
     document.getElementById('btn-settings')?.addEventListener('click', () => {
       loadSettings();
+      const resEl = document.getElementById('acp-test-result');
+      if (resEl) {
+        resEl.classList.add('hidden');
+        resEl.innerHTML = '';
+      }
       document.getElementById('settings-modal')?.classList.remove('hidden');
     });
     document.getElementById('settings-close-btn')?.addEventListener('click', () => {
@@ -1637,6 +1794,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       document.getElementById('settings-modal')?.classList.add('hidden');
     });
     document.getElementById('settings-save-btn')?.addEventListener('click', saveSettingsFromUI);
+    document.getElementById('btn-test-acp')?.addEventListener('click', testAcpConnection);
 
     initRunWebSocket();
     loadRunStatuses();

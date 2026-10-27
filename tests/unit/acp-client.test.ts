@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
+import { Writable } from 'node:stream';
 import { AcpClient, isPathWithinWorkspace } from '../../src/server/acp-client.js';
 
 describe('ACP Client Subprocess Adapter (Seam: ACP Client Module)', () => {
@@ -244,5 +245,212 @@ rl.on('line', (line) => {
     // Allow process cleanup tick
     await new Promise((r) => setTimeout(r, 100));
     expect(client.isAlive()).toBe(false);
+  });
+
+  it('probes agent connection successfully, executing handshake and ephemeral session check', async () => {
+    const mockAgentScript = path.join(tempDir, 'fake-probe-agent.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: {
+        protocolVersion: 1,
+        agentInfo: { name: 'agy-acp', version: '2.4.0' }
+      }
+    }) + '\\n');
+  } else if (msg.method === 'notifications/initialized') {
+    // Handshake complete
+  } else if (msg.method === 'session/new' || msg.method === 'session/create') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { sessionId: 'probe-session-1' }
+    }) + '\\n');
+  } else if (msg.method === 'session/close') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { closed: true }
+    }) + '\\n');
+    process.exit(0);
+  }
+});
+`,
+      'utf-8'
+    );
+
+    const client = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript, '--model', 'gemini-2.5-pro'],
+      workspaceRoot: tempDir
+    });
+
+    const result = await client.probe();
+    expect(result.ok).toBe(true);
+    expect(result.agent).toEqual({
+      name: 'agy-acp',
+      version: '2.4.0'
+    });
+    expect(result.model).toBe('gemini-2.5-pro');
+    expect(client.isAlive()).toBe(false);
+  });
+
+  it('resolves model directly from ACP protocol initialize metadata when available', async () => {
+    const mockAgentScript = path.join(tempDir, 'fake-protocol-model-agent.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: {
+        serverInfo: { name: 'claude-code', version: '1.0.0', model: 'claude-3-7-sonnet' }
+      }
+    }) + '\\n');
+  } else if (msg.method === 'notifications/initialized') {
+  } else if (msg.method === 'session/new' || msg.method === 'session/create') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 's-proto' } }) + '\\n');
+  } else if (msg.method === 'session/close') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { closed: true } }) + '\\n');
+    process.exit(0);
+  }
+});
+`,
+      'utf-8'
+    );
+
+    const client = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript],
+      workspaceRoot: tempDir
+    });
+
+    const result = await client.probe();
+    expect(result.ok).toBe(true);
+    expect(result.agent).toEqual({ name: 'claude-code', version: '1.0.0' });
+    expect(result.model).toBe('claude-3-7-sonnet');
+    expect(client.isAlive()).toBe(false);
+  });
+
+  it('enforces timeout and shuts down hanging agent process', async () => {
+    const mockAgentScript = path.join(tempDir, 'fake-probe-hanging.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+const readline = require('readline');
+readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+// Never responds to anything
+`,
+      'utf-8'
+    );
+
+    const client = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript],
+      workspaceRoot: tempDir
+    });
+
+    const result = await client.probe({ timeoutMs: 200 });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/timed out/i);
+    // Wait for process cleanup
+    await new Promise((r) => setTimeout(r, 100));
+    expect(client.isAlive()).toBe(false);
+  });
+
+  it('captures stderr and failure details when agent crashes or fails', async () => {
+    const mockAgentScript = path.join(tempDir, 'fake-crashing-agent.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+console.error("FATAL: Missing API key or configuration error");
+process.exit(1);
+`,
+      'utf-8'
+    );
+
+    const client = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript],
+      workspaceRoot: tempDir
+    });
+
+    const result = await client.probe();
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain('FATAL: Missing API key');
+    expect(client.isAlive()).toBe(false);
+  });
+
+  it('logs subprocess lifecycle, handshake, and session events with component tag', async () => {
+    const mockAgentScript = path.join(tempDir, 'fake-logging-agent.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { agentInfo: { name: 'test-agent', version: '1.0.0' } }
+    }) + '\\n');
+  } else if (msg.method === 'notifications/initialized') {
+  } else if (msg.method === 'session/new' || msg.method === 'session/create') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'log-sess-1' } }) + '\\n');
+  } else if (msg.method === 'session/close') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { closed: true } }) + '\\n');
+    process.exit(0);
+  }
+});
+`,
+      'utf-8'
+    );
+
+    const logs: any[] = [];
+    const stream = new Writable({
+      write(chunk, _encoding, cb) {
+        logs.push(JSON.parse(chunk.toString()));
+        cb();
+      }
+    });
+
+    const client = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript],
+      workspaceRoot: tempDir,
+      logger: { stream, level: 'info' }
+    });
+
+    const result = await client.probe();
+    expect(result.ok).toBe(true);
+
+    const spawnLog = logs.find((l) => l.component === 'acp' && typeof l.msg === 'string' && l.msg.includes('Spawning'));
+    expect(spawnLog).toBeDefined();
+
+    const handshakeLog = logs.find((l) => l.component === 'acp' && typeof l.msg === 'string' && l.msg.includes('handshake'));
+    expect(handshakeLog).toBeDefined();
+
+    const sessionLog = logs.find((l) => l.component === 'acp' && (l.sessionId === 'log-sess-1' || (typeof l.msg === 'string' && l.msg.includes('session'))));
+    expect(sessionLog).toBeDefined();
   });
 });

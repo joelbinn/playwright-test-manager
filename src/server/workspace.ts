@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createDomainLogger } from './logger.js';
 
 export interface WorkspaceFile {
   name: string;
@@ -14,7 +15,8 @@ export interface WorkspaceSnapshot {
   scripts: WorkspaceFile[];
 }
 
-export async function scanWorkspace(workspaceRoot: string): Promise<WorkspaceSnapshot> {
+export async function scanWorkspace(workspaceRoot: string, logger?: any): Promise<WorkspaceSnapshot> {
+  const log = createDomainLogger('workspace', logger);
   const specsDir = path.join(workspaceRoot, 'specs');
   const testsDir = path.join(workspaceRoot, 'tests');
 
@@ -58,6 +60,11 @@ export async function scanWorkspace(workspaceRoot: string): Promise<WorkspaceSna
   } catch (err: any) {
     if (err.code !== 'ENOENT') throw err;
   }
+
+  log.info(
+    { rootPath: workspaceRoot, specCount: specs.length, scriptCount: scripts.length },
+    `Scanned workspace: found ${specs.length} specs and ${scripts.length} scripts`
+  );
 
   return {
     rootPath: workspaceRoot,

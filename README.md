@@ -58,16 +58,33 @@ npx tsx src/cli.ts /path/to/playwright-project
 
 # Customize port and disable automatic browser opening
 npx tsx src/cli.ts --port 5000 --no-open
+
+# Enable verbose or debug logging for full request and subsystem tracing
+npx tsx src/cli.ts --verbose
+# or
+npx tsx src/cli.ts --debug
+# or via environment variable
+LOG_LEVEL=debug npx tsx src/cli.ts
 ```
 
-### CLI Flags
+### CLI Flags & Environment Variables
 
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `[path]` | Path to target Playwright workspace root | `process.cwd()` |
-| `--port <number>` | HTTP port for the web interface | `4321` |
-| `--host <string>` | Host address to bind to | `localhost` |
-| `--no-open` | Prevent automatic opening of default browser | `false` |
+| Flag / Variable | Type | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `[path]` | Argument | Path to target Playwright workspace root | `process.cwd()` |
+| `--port <number>` | Flag | HTTP port for the web interface | `4321` |
+| `--host <string>` | Flag | Host address to bind to | `localhost` |
+| `--no-open` | Flag | Prevent automatic opening of default browser | `false` |
+| `--verbose` | Flag | Enable debug-level logging across all subsystems | `false` |
+| `--debug` | Flag | Alias for `--verbose` (sets log level to `debug`) | `false` |
+| `LOG_LEVEL` | Env Var | Configures backend logging level (`fatal`, `error`, `warn`, `info`, `debug`, `trace`) | `info` |
+
+### 🪵 Logging Infrastructure
+
+Playwright Test Manager includes structured, human-readable logging powered by Pino and `pino-pretty`:
+- **HTTP Request Logging**: Automatically captures method, URL path, response status, duration in ms, and correlated `reqId` while silencing noise from static assets and WebSocket pings.
+- **Domain Subsystem Tags**: All logs from the test runner, ACP agent adapter, workspace scanner, and WebSocket connection manager are tagged with their subsystem (`runner`, `acp`, `workspace`, `websocket`).
+- **Error Tracing**: Uncaught errors and 500 responses log full stack traces and context tagged with their request correlation ID.
 
 ---
 
