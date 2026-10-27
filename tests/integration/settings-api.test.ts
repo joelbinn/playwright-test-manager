@@ -67,4 +67,28 @@ describe('Project Settings API (Seam: Fastify HTTP API)', () => {
     expect(getResponse.statusCode).toBe(200);
     expect(getResponse.json()).toEqual(updated);
   });
+
+  it('strips surrounding single and double quotes from acpArgs', async () => {
+    const postResponse = await app.inject({
+      method: 'POST',
+      url: '/api/settings',
+      payload: {
+        agentType: 'acp',
+        acpCommand: 'npx',
+        acpArgs: ['-y', 'agy-acp', 'start', '--mode', 'stdio', '--model', "'gemini-3.8-flash'"]
+      }
+    });
+
+    expect(postResponse.statusCode).toBe(200);
+    const body = postResponse.json();
+    expect(body.acpArgs).toEqual([
+      '-y',
+      'agy-acp',
+      'start',
+      '--mode',
+      'stdio',
+      '--model',
+      'gemini-3.8-flash'
+    ]);
+  });
 });

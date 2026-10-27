@@ -1602,7 +1602,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
       const agentType = document.getElementById('settings-agent-type')?.value;
       const acpCommand = document.getElementById('settings-acp-command')?.value.trim();
       const acpArgsRaw = document.getElementById('settings-acp-args')?.value.trim() || '';
-      const acpArgs = acpArgsRaw ? acpArgsRaw.split(/\\s+/) : [];
+      const acpArgs = acpArgsRaw ? (acpArgsRaw.match(/[^\\s"']+|"([^"]*)"|'([^']*)'/g) || []).map(s => s.replace(/^['"]|['"]$/g, '')) : [];
       const statusEl = document.getElementById('settings-status');
 
       try {
