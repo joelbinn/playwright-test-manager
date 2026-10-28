@@ -155,4 +155,70 @@ rl.on('line', (line) => {
     expect(body.ok).toBe(false);
     expect(body.error).toBeDefined();
   });
+
+  it('logs ACP messages when server is configured with logLevel debug', async () => {
+    const mockAgentScript = path.join(tempDir, 'test-acp-log-agent.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { serverInfo: { name: 'debug-agent', version: '1.0.0' } }
+    }) + '\\n');
+  } else if (msg.method === 'notifications/initialized') {
+  } else if (msg.method === 'session/new' || msg.method === 'session/create') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'debug-sess' } }) + '\\n');
+  } else if (msg.method === 'session/close') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { closed: true } }) + '\\n');
+    process.exit(0);
+  }
+});
+`,
+      'utf-8'
+    );
+
+    const logs: any[] = [];
+    const { Writable } = await import('node:stream');
+    const logStream = new Writable({
+      write(chunk, _encoding, cb) {
+        try {
+          logs.push(JSON.parse(chunk.toString()));
+        } catch {}
+        cb();
+      }
+    });
+
+    const debugApp = await createServer({
+      workspaceRoot: tempDir,
+      logger: { level: 'debug', stream: logStream }
+    });
+
+    try {
+      const res = await debugApp.inject({
+        method: 'POST',
+        url: '/api/settings/test-acp',
+        payload: {
+          acpCommand: 'node',
+          acpArgs: [mockAgentScript]
+        }
+      });
+      expect(res.statusCode).toBe(200);
+
+      const acpOutgoing = logs.find((l) => l.component === 'acp' && l.direction === 'outgoing');
+      expect(acpOutgoing).toBeDefined();
+
+      const acpIncoming = logs.find((l) => l.component === 'acp' && l.direction === 'incoming');
+      expect(acpIncoming).toBeDefined();
+    } finally {
+      await debugApp.close();
+    }
+  });
 });

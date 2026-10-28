@@ -168,7 +168,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     const client = new AcpClient({
       command: command || '',
       args: cleanArgs,
-      workspaceRoot: options.workspaceRoot
+      workspaceRoot: options.workspaceRoot,
+      logger: app.log
     });
 
     return await client.probe({ timeoutMs: 8000 });
@@ -368,7 +369,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           const client = new AcpClient({
             command: settings.acpCommand,
             args: settings.acpArgs,
-            workspaceRoot: options.workspaceRoot
+            workspaceRoot: options.workspaceRoot,
+            logger: app.log
           });
           for await (const chunk of client.streamTask({
             role: 'planner',
@@ -437,7 +439,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           const client = new AcpClient({
             command: settings.acpCommand,
             args: settings.acpArgs,
-            workspaceRoot: options.workspaceRoot
+            workspaceRoot: options.workspaceRoot,
+            logger: app.log
           });
           for await (const chunk of client.streamTask({
             role: 'generator',
@@ -521,7 +524,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
           const client = new AcpClient({
             command: settings.acpCommand,
             args: settings.acpArgs,
-            workspaceRoot: options.workspaceRoot
+            workspaceRoot: options.workspaceRoot,
+            logger: app.log
           });
           for await (const chunk of client.streamTask({
             role: 'healer',

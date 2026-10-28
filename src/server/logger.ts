@@ -59,7 +59,7 @@ export function createDomainLogger(
   }
 
   const baseOptions = {
-    level: parentOrOptions?.level || 'info'
+    level: parentOrOptions?.level || resolveLogLevel({ argv: process.argv.slice(2), env: process.env })
   };
 
   const stream = parentOrOptions?.stream;
