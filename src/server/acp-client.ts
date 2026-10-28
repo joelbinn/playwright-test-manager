@@ -87,6 +87,15 @@ export class AcpClient {
     if (!this.process || !this.process.stdin || this.process.stdin.destroyed) {
       throw new Error('ACP agent process stdin is not writable');
     }
+    this.logger.debug(
+      {
+        direction: 'outgoing',
+        method: message.method,
+        id: message.id,
+        message
+      },
+      'ACP message sent'
+    );
     this.process.stdin.write(JSON.stringify(message) + '\n');
   }
 
@@ -198,6 +207,15 @@ export class AcpClient {
         if (!line.trim()) return;
         try {
           const msg = JSON.parse(line);
+          this.logger.debug(
+            {
+              direction: 'incoming',
+              method: msg.method,
+              id: msg.id,
+              message: msg
+            },
+            'ACP message received'
+          );
           if (typeof msg.id === 'number' && this.pendingRequests.has(msg.id)) {
             const { resolve, reject } = this.pendingRequests.get(msg.id)!;
             this.pendingRequests.delete(msg.id);
@@ -207,7 +225,9 @@ export class AcpClient {
               resolve(msg.result);
             }
           }
-        } catch {}
+        } catch (err: any) {
+          this.logger.warn({ raw: line, error: err?.message }, 'Failed to parse incoming ACP JSON-RPC line');
+        }
       });
 
       child.on('error', (err) => {
@@ -344,6 +364,15 @@ export class AcpClient {
       if (!line.trim()) return;
       try {
         const msg = JSON.parse(line);
+        this.logger.debug(
+          {
+            direction: 'incoming',
+            method: msg.method,
+            id: msg.id,
+            message: msg
+          },
+          'ACP message received'
+        );
 
         // Check if response to a request we sent
         if (typeof msg.id === 'number' && this.pendingRequests.has(msg.id)) {
@@ -455,7 +484,7 @@ export class AcpClient {
           }
         }
       } catch (err: any) {
-        // Ignore unparseable lines or handle error
+        this.logger.warn({ raw: line, error: err?.message }, 'Failed to parse incoming ACP JSON-RPC line');
       }
     });
 

@@ -453,4 +453,198 @@ rl.on('line', (line) => {
     const sessionLog = logs.find((l) => l.component === 'acp' && (l.sessionId === 'log-sess-1' || (typeof l.msg === 'string' && l.msg.includes('session'))));
     expect(sessionLog).toBeDefined();
   });
+
+  it('logs outgoing and incoming ACP JSON-RPC messages at debug level and suppresses them at info level', async () => {
+    const mockAgentScript = path.join(tempDir, 'fake-traffic-agent.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { agentInfo: { name: 'traffic-agent', version: '1.0.0' } }
+    }) + '\\n');
+  } else if (msg.method === 'notifications/initialized') {
+  } else if (msg.method === 'session/new' || msg.method === 'session/create') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'traffic-sess-1' } }) + '\\n');
+  } else if (msg.method === 'session/close') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { closed: true } }) + '\\n');
+    process.exit(0);
+  }
+});
+`,
+      'utf-8'
+    );
+
+    // 1. Verify with level: 'debug' -> messages should be logged
+    const debugLogs: any[] = [];
+    const debugStream = new Writable({
+      write(chunk, _encoding, cb) {
+        debugLogs.push(JSON.parse(chunk.toString()));
+        cb();
+      }
+    });
+
+    const debugClient = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript],
+      workspaceRoot: tempDir,
+      logger: { stream: debugStream, level: 'debug' }
+    });
+
+    const probeResult = await debugClient.probe();
+    expect(probeResult.ok).toBe(true);
+
+    const outgoingInit = debugLogs.find(
+      (l) => l.component === 'acp' && l.direction === 'outgoing' && l.message?.method === 'initialize'
+    );
+    expect(outgoingInit).toBeDefined();
+    expect(outgoingInit.message.jsonrpc).toBe('2.0');
+
+    const incomingInit = debugLogs.find(
+      (l) => l.component === 'acp' && l.direction === 'incoming' && l.message?.result?.agentInfo?.name === 'traffic-agent'
+    );
+    expect(incomingInit).toBeDefined();
+
+    // 2. Verify with level: 'info' -> messages should NOT be logged
+    const infoLogs: any[] = [];
+    const infoStream = new Writable({
+      write(chunk, _encoding, cb) {
+        infoLogs.push(JSON.parse(chunk.toString()));
+        cb();
+      }
+    });
+
+    const infoClient = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript],
+      workspaceRoot: tempDir,
+      logger: { stream: infoStream, level: 'info' }
+    });
+
+    const infoProbeResult = await infoClient.probe();
+    expect(infoProbeResult.ok).toBe(true);
+
+    const infoOutgoing = infoLogs.filter((l) => l.component === 'acp' && (l.direction === 'outgoing' || l.direction === 'incoming'));
+    expect(infoOutgoing.length).toBe(0);
+  });
+
+  it('logs warnings on malformed JSON lines and logs agent requests and permission responses during task streaming', async () => {
+    const mockAgentScript = path.join(tempDir, 'fake-stream-logging-agent.js');
+    await fs.writeFile(
+      mockAgentScript,
+      `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+let promptId = null;
+
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { agentInfo: { name: 'stream-agent', version: '1.0.0' } }
+    }) + '\\n');
+  } else if (msg.method === 'notifications/initialized') {
+  } else if (msg.method === 'session/new' || msg.method === 'session/create') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'stream-sess-1' } }) + '\\n');
+  } else if (msg.method === 'session/prompt') {
+    promptId = msg.id;
+    // Send a corrupted/unparseable line first
+    process.stdout.write('INVALID_JSON_LINE_FROM_AGENT\\n');
+
+    // Send an agent request for permission
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 999,
+      method: 'permission/request',
+      params: { path: 'specs/sample.md' }
+    }) + '\\n');
+  } else if (typeof msg.id === 'number' && msg.id === 999) {
+    // Received permission approval response from AcpClient
+    // Stream a chunk
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: { sessionId: 'stream-sess-1', chunk: 'chunk-1' }
+    }) + '\\n');
+
+    // Complete session prompt
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: promptId,
+      result: { status: 'completed' }
+    }) + '\\n');
+  } else if (msg.method === 'session/close') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { closed: true }
+    }) + '\\n');
+    process.exit(0);
+  }
+});
+`,
+      'utf-8'
+    );
+
+    const logs: any[] = [];
+    const stream = new Writable({
+      write(chunk, _encoding, cb) {
+        logs.push(JSON.parse(chunk.toString()));
+        cb();
+      }
+    });
+
+    const client = new AcpClient({
+      command: 'node',
+      args: [mockAgentScript],
+      workspaceRoot: tempDir,
+      logger: { stream, level: 'debug' }
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.streamTask({
+      role: 'generator',
+      prompt: 'Write sample test'
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(['chunk-1']);
+
+    // Check warning on malformed JSON
+    const warnLog = logs.find((l) => l.component === 'acp' && l.raw === 'INVALID_JSON_LINE_FROM_AGENT');
+    expect(warnLog).toBeDefined();
+    expect(warnLog.msg).toContain('Failed to parse incoming ACP JSON-RPC line');
+
+    // Check incoming agent request
+    const incomingReq = logs.find(
+      (l) => l.component === 'acp' && l.direction === 'incoming' && l.message?.method === 'permission/request'
+    );
+    expect(incomingReq).toBeDefined();
+
+    // Check outgoing response to agent request
+    const outgoingResp = logs.find(
+      (l) => l.component === 'acp' && l.direction === 'outgoing' && l.message?.id === 999
+    );
+    expect(outgoingResp).toBeDefined();
+    expect(outgoingResp.message.result.approved).toBe(true);
+
+    // Check incoming session/update
+    const incomingUpdate = logs.find(
+      (l) => l.component === 'acp' && l.direction === 'incoming' && l.message?.method === 'session/update'
+    );
+    expect(incomingUpdate).toBeDefined();
+  });
 });
